@@ -58,7 +58,7 @@
 
 /* 设置VDD_MIPI_DPHY输出电压 */
 #define MIPI_DSI_PHY_PWR_LDO_CHAN       3       /* LDO_VO3 连接 VDD_MIPI_DPHY */
-#define MIPI_DSI_PHY_PWR_LDO_VOLTAGE_MV 2500    /* 乐鑫 ESP32-P4 Function EV Board MIPI-DSI 参考参数 */
+#define MIPI_DSI_PHY_PWR_LDO_VOLTAGE_MV 2500    /* ESP32-P4 v3.x DPHY 供电参数 */
 
 /* ILI9881C User Define command set 用户自定义命令集 */
 #define ILI9881C_CMD_CNDBKxSEL                  (0xFF)

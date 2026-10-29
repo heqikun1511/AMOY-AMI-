@@ -14,20 +14,24 @@
 #define WS2815_TEST_LED_COUNT     8
 #define WS2815_RMT_RESOLUTION_HZ  (10 * 1000 * 1000)
 
-/* 0--5000 rpm display calibration. The final pre-limit red zone is 500 rpm. */
-#define RPM_START                  500
-#define RPM_YELLOW                 1800
-#define RPM_ORANGE                 3100
+/* Eight-LED tachometer layout: 3 green, 3 yellow, 2 red, then shift flash. */
+#define RPM_GREEN_LEDS             3
+#define RPM_YELLOW_LEDS            3
+#define RPM_RED_LEDS               2
 #define RPM_SHIFT                  4500
 #define RPM_LIMIT                  5000
 #define RPM_BAR_REFRESH_MS         20
+#define RPM_IDLE_FLASH_HALF_MS     450
 #define RPM_SHIFT_FLASH_HALF_MS    70   /* about 7 Hz */
 #define RPM_LIMIT_FLASH_HALF_MS    45   /* about 11 Hz */
 #define WS2815_STARTUP_SELF_TEST    0
-#define LED_SELF_TEST_COLOR_MS     500
+#define LED_SELF_TEST_COLOR_MS     350
 #define LED_SELF_TEST_CHASE_MS     100
 
 static const char *TAG = "WS2815_TEST";
+/* The task is started at boot so the AMI home screen has a deterministic
+ * standby indication.  It is only written from the UI task. */
+static volatile bool s_home_standby = true;
 
 static void ws2815_send_frame(rmt_channel_handle_t channel,
                               rmt_encoder_handle_t encoder,
@@ -52,10 +56,52 @@ static void ws2815_rpm_bar_frame(uint8_t *pixels, int rpm, TickType_t now)
 {
     memset(pixels, 0, WS2815_TEST_LED_COUNT * 3);
 
-    if (rpm < RPM_START) {
-        /* All LEDs show a very dim blue standby state. */
+    /* AMI 首页：所有转速灯常亮暗绿色，不闪烁、不随后台 RPM 演示变化。 */
+    if (s_home_standby) {
         for (size_t i = 0; i < WS2815_TEST_LED_COUNT; ++i) {
-            ws2815_set_rgb(pixels, i, 0, 0, 8);
+            ws2815_set_rgb(pixels, i, 0, 36, 6);
+        }
+        return;
+    }
+
+    if (rpm < 0) {
+        rpm = 0;
+    }
+
+    if (rpm == 0) {
+        /* At zero RPM the entire strip gives a clearly visible but subdued
+         * light-blue heartbeat.  It is intentionally brighter than the old
+         * (0, 0, 8) value, which looked like a failed first LED. */
+        bool on = ((now / pdMS_TO_TICKS(RPM_IDLE_FLASH_HALF_MS)) & 1U) == 0;
+        if (on) {
+            for (size_t i = 0; i < WS2815_TEST_LED_COUNT; ++i) {
+                ws2815_set_rgb(pixels, i, 0, 28, 72);
+            }
+        }
+        return;
+    }
+
+    if (rpm < RPM_SHIFT) {
+        /* Once motion starts, LED 1 is bright green and every following LED
+         * adds a fixed colour zone: 3 green, 3 yellow, 2 red. */
+        const int span = RPM_SHIFT;
+        int lit_count = (rpm * WS2815_TEST_LED_COUNT + span - 1) / span;
+        if (lit_count < 1) {
+            lit_count = 1;
+        }
+        if (lit_count > WS2815_TEST_LED_COUNT) {
+            lit_count = WS2815_TEST_LED_COUNT;
+        }
+
+        for (int i = 0; i < lit_count; ++i) {
+            if (i < RPM_GREEN_LEDS) {
+                ws2815_set_rgb(pixels, i, 0, 255, 0);
+            } else if (i < RPM_GREEN_LEDS + RPM_YELLOW_LEDS) {
+                /* Hardware-verified yellow on this RGB-order chain: FF FF 00. */
+                ws2815_set_rgb(pixels, i, 255, 255, 0);
+            } else {
+                ws2815_set_rgb(pixels, i, 255, 0, 0);
+            }
         }
         return;
     }
@@ -73,26 +119,6 @@ static void ws2815_rpm_bar_frame(uint8_t *pixels, int rpm, TickType_t now)
         return;
     }
 
-    const int span = RPM_SHIFT - RPM_START;
-    int lit_count = ((rpm - RPM_START) * WS2815_TEST_LED_COUNT + span - 1) / span;
-    if (lit_count < 1) {
-        lit_count = 1;
-    }
-    if (lit_count > WS2815_TEST_LED_COUNT) {
-        lit_count = WS2815_TEST_LED_COUNT;
-    }
-
-    for (int i = 0; i < lit_count; ++i) {
-        int led_rpm = RPM_START + (i * span) / WS2815_TEST_LED_COUNT;
-        if (led_rpm >= RPM_ORANGE) {
-            ws2815_set_rgb(pixels, i, 180, 55, 0);
-        } else if (led_rpm >= RPM_YELLOW) {
-            /* Yellow middle zone of the 8-LED speed bar. */
-            ws2815_set_rgb(pixels, i, 255, 255, 0);
-        } else {
-            ws2815_set_rgb(pixels, i, 0, 130, 0);
-        }
-    }
 }
 
 static void ws2815_rpm_bar_task(void *arg)
@@ -156,6 +182,11 @@ void ws2815_rpm_bar_start(volatile int *rpm_source)
     BaseType_t created = xTaskCreate(ws2815_rpm_bar_task, "ws2815_rpm", 4096,
                                      (void *)rpm_source, 4, NULL);
     ESP_ERROR_CHECK(created == pdPASS ? ESP_OK : ESP_ERR_NO_MEM);
+}
+
+void ws2815_rpm_bar_set_home_standby(bool enabled)
+{
+    s_home_standby = enabled;
 }
 
 void gpio13_high_level_test(void)

@@ -18,13 +18,17 @@ static lv_obj_t *getLvglObjectFromIndex(int32_t index) {
 void loadScreen(enum ScreensEnum screenId) {
     currentScreen = screenId - 1;
     lv_obj_t *screen = getLvglObjectFromIndex(currentScreen);
-    lv_scr_load_anim(screen, LV_SCR_LOAD_ANIM_FADE_IN, 200, 0, false);
+    /* A 1080p software-rotated fade redraws the whole screen for every
+     * animation step.  Use an immediate swap so navigation stays responsive. */
+    lv_scr_load_anim(screen, LV_SCR_LOAD_ANIM_NONE, 0, 0, false);
 }
 
 void ui_init() {
     create_screens();
-    /* The AMI task-selection screen is the boot screen for the EC11 test. */
-    loadScreen(SCREEN_ID_AMI);
+    /* The boot screen is rendered while BL is still off.  Avoid a 200 ms
+     * fade from LVGL's blank default screen. */
+    currentScreen = SCREEN_ID_AMI - 1;
+    lv_scr_load(getLvglObjectFromIndex(currentScreen));
 
 }
 

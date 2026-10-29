@@ -3,19 +3,17 @@ idf_component_register(
         "."
         "APP" 
         "ui"
-        "BSP" 
-        "ws2815"
+        "BSP"
     INCLUDE_DIRS 
         "."
         "APP"
         "ui"
         "BSP"
-        "ws2815"
     REQUIRES
         driver
-        esp_driver_rmt
         nvs_flash
         esp_timer
+        espressif__esp_tinyusb
         BSP)
 
 # Compatibility implementations for EEZ native variables referenced by screens.c.

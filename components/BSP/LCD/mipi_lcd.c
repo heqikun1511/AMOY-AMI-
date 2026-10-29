@@ -741,7 +741,7 @@ err:
  */
 esp_lcd_panel_handle_t mipi_lcd_init(void)
 {
-    mipi_dev_bsp_enable_dsi_phy_power();                    /* 配置DSI接口电压1.8V */
+    mipi_dev_bsp_enable_dsi_phy_power();                    /* 配置DSI PHY电源：2.5V */
     
     /* 创建DSI总线 */
     esp_lcd_dsi_bus_handle_t mipi_dsi_bus;

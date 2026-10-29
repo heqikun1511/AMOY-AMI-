@@ -24,18 +24,23 @@
 #include "freertos/task.h"
 #include "esp_heap_caps.h"
 
+/* One-shot DSI-path discriminator for the ESP32-P4 v3.2 investigation.
+ * The pattern generator bypasses PSRAM, DW-GDMA framebuffer scan-out and
+ * LVGL. It is shown only during boot and then normal rendering resumes. */
+#define LCD_DSI_BOOT_PATTERN_DIAGNOSTIC 0
+#define LCD_DSI_BOOT_PATTERN_TIME_MS    10000
+
 
 DRAM_ATTR void *lcd_buffer[2];              /* 指向屏幕双缓存 */
 DRAM_ATTR uint8_t buffer_sw = 0;            /* 当前使用的缓冲区索引 */
 DRAM_ATTR volatile uint8_t refresh_done_flag = 0; /* ISR/任务共享的刷新完成标志 */
+DRAM_ATTR volatile uint32_t refresh_done_count = 0; /* DSI bridge VSYNC计数 */
 DRAM_ATTR _lcd_dev lcddev;                  /* 管理LCD重要参数 */
 uint32_t g_back_color  = 0xFFFF;            /* 背景色 */
 
-/*
- * Keep the active-high backlight enable asserted while the DSI host is
- * initialized. RST is still later pulsed by mipi_lcd_panelreset() after the
- * DSI PHY has been powered up.
- */
+/* Keep the panel dark while the DSI host, DPI frame buffers and first LVGL
+ * frame are prepared.  The normal UI path enables BL only after a confirmed
+ * VSYNC, so reset/default panel contents never appear as a white flash. */
 static void lcd_control_gpio_init(void)
 {
     const gpio_config_t config = {
@@ -47,7 +52,7 @@ static void lcd_control_gpio_init(void)
     };
 
     ESP_ERROR_CHECK(gpio_config(&config));
-    LCD_BACKLIGHT_ON();
+    LCD_BACKLIGHT_OFF();
     LCD_RESET_ASSERT();
     ESP_LOGI("lcd", "LCD control GPIO ready: BL=GPIO%d (active high), RST=GPIO%d (active low)",
              LCD_BL_PIN, LCD_RST_PIN);
@@ -136,6 +141,7 @@ uint16_t lcd_panelid_read(void)
 IRAM_ATTR static bool lcd_mipi_panel_refresh_done_callback(esp_lcd_panel_handle_t panel_io, esp_lcd_dpi_panel_event_data_t *edata, void *user_ctx)
 {
     refresh_done_flag = 1;
+    ++refresh_done_count;
     return false;
 }
 
@@ -170,10 +176,20 @@ void lcd_init(void)
     };
     ESP_ERROR_CHECK(esp_lcd_dpi_panel_register_event_callbacks(lcddev.lcd_panel_handle, &mipi_cbs, NULL));
 
-    /* 面板和帧缓冲区已经就绪，先打开背光。即使首帧刷新异常，也不会表现为
-     * 完全无供电的黑屏，便于在没有串口监视器时判断硬件状态。 */
-    LCD_BACKLIGHT_ON();
-    lcd_clear(WHITE);
+    /* Preload a known black scanout frame while BL stays off.  The normal
+     * LVGL path waits for its own first frame before enabling the backlight. */
+    lcd_clear(BLACK);
+
+#if LCD_DSI_BOOT_PATTERN_DIAGNOSTIC
+    ESP_LOGW("lcd", "DSI hardware vertical-bar diagnostic active for %d ms",
+             LCD_DSI_BOOT_PATTERN_TIME_MS);
+    ESP_ERROR_CHECK(esp_lcd_dpi_panel_set_pattern(lcddev.lcd_panel_handle,
+                                                   MIPI_DSI_PATTERN_BAR_VERTICAL));
+    vTaskDelay(pdMS_TO_TICKS(LCD_DSI_BOOT_PATTERN_TIME_MS));
+    ESP_ERROR_CHECK(esp_lcd_dpi_panel_set_pattern(lcddev.lcd_panel_handle,
+                                                   MIPI_DSI_PATTERN_NONE));
+    ESP_LOGW("lcd", "DSI hardware vertical-bar diagnostic finished; normal framebuffer resumed");
+#endif
 }
 
 /**
@@ -194,6 +210,7 @@ IRAM_ATTR void lcd_clear(uint16_t color)
     /* 必须在提交刷新之前清标志。原来的顺序存在竞态：若回调在
      * draw_bitmap() 返回前执行，随后清零会导致这里永久等待。 */
     refresh_done_flag = 0;
+    const uint32_t refresh_count_before = refresh_done_count;
     esp_err_t ret = esp_lcd_panel_draw_bitmap(lcddev.lcd_panel_handle, 0, 0,
                                                lcddev.width, lcddev.height, buffer);
     if (ret != ESP_OK)
@@ -202,21 +219,47 @@ IRAM_ATTR void lcd_clear(uint16_t color)
         return;
     }
 
-    /* 显示硬件异常时不能永久卡死整个应用。正常一帧远小于500 ms。 */
-    uint32_t timeout_ms = 500;
-    while (refresh_done_flag != 1 && timeout_ms-- > 0)
+    /* This project runs at 100 Hz, so pdMS_TO_TICKS(1) is zero.  Use a real
+     * tick deadline and wait at least one tick per iteration; otherwise the
+     * old 500-iteration loop incorrectly reports a DSI timeout after only a
+     * few scheduler yields. */
+    const TickType_t wait_start = xTaskGetTickCount();
+    const TickType_t wait_limit = pdMS_TO_TICKS(500);
+    while (refresh_done_flag != 1 &&
+           (xTaskGetTickCount() - wait_start) < wait_limit)
     {
-        vTaskDelay(pdMS_TO_TICKS(1));
+        vTaskDelay(1);
     }
 
     if (refresh_done_flag != 1)
     {
-        ESP_LOGW("lcd", "frame refresh timeout");
+        ESP_LOGW("lcd", "frame refresh timeout after 500 ms (DSI VSYNC %lu -> %lu)",
+                 (unsigned long)refresh_count_before,
+                 (unsigned long)refresh_done_count);
         return;
     }
 
+    ESP_LOGI("lcd", "first DSI frame completed (VSYNC %lu -> %lu)",
+             (unsigned long)refresh_count_before,
+             (unsigned long)refresh_done_count);
+
     /* 使用异或操作在 0 和 1 之间切换，目的是为了切换另一个缓冲区 */
     buffer_sw ^= 1;
+}
+
+bool lcd_wait_for_next_refresh(uint32_t timeout_ms)
+{
+    const uint32_t refresh_count_before = refresh_done_count;
+    const TickType_t wait_start = xTaskGetTickCount();
+    const TickType_t wait_limit = pdMS_TO_TICKS(timeout_ms);
+
+    while (refresh_done_count == refresh_count_before &&
+           (xTaskGetTickCount() - wait_start) < wait_limit)
+    {
+        vTaskDelay(1);
+    }
+
+    return refresh_done_count != refresh_count_before;
 }
 
 /**

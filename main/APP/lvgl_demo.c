@@ -91,7 +91,15 @@ static void lvgl_init_common(bool enable_app_ui)
     g_lvgl_mutex = xSemaphoreCreateMutex();
     assert(g_lvgl_mutex);
     lv_init();              /* 初始化LVGL图形to_rgb565.c:256库 */
-    lv_port_disp_init();    /* lvgl显示接口初始化,放在lv_init()的后面 */
+    if (lv_port_disp_init() == NULL) {
+        /* A DSI diagnostic failure must not continue into UI allocation with
+         * a 0x0 display. Keep USB CDC alive so the actual LCD error remains
+         * visible instead of turning into an unrelated reset. */
+        ESP_LOGE("lvgl_demo", "Display initialisation failed; LVGL/UI deliberately not started");
+        for (;;) {
+            vTaskDelay(pdMS_TO_TICKS(1000));
+        }
+    }
     /* 为LVGL提供时基单元 */
     const esp_timer_create_args_t lvgl_tick_timer_args = {
         .callback = &increase_lvgl_tick,    /* 设置定时器回调 */
@@ -102,8 +110,16 @@ static void lvgl_init_common(bool enable_app_ui)
     ESP_ERROR_CHECK(esp_timer_start_periodic(lvgl_tick_timer, 1 * 1000));           /* 启动定时器 */
 
     if (enable_app_ui) {
-        /* EEZ Studio UI */
+        /* Build and submit the boot UI while BL is off.  Showing the panel
+         * earlier exposes its reset/default white frame while the UI and the
+         * software rotation buffer are still being prepared. */
         ui_init();
+        lv_refr_now(NULL);
+        if (!lcd_wait_for_next_refresh(500)) {
+            ESP_LOGW("lvgl_demo", "Timed out waiting for the first UI VSYNC; enabling backlight anyway");
+        }
+        LCD_BACKLIGHT_ON();
+        ESP_LOGI("lvgl_demo", "First UI frame ready; backlight enabled");
     }
 
     /* 创建独立任务运行 lv_timer_handler 循环, 避免阻塞 app_main
@@ -143,6 +159,10 @@ lv_disp_t *lv_port_disp_init(void)
 
     /* 初始化显示设备LCD */
     lcd_init();                             /* LCD初始化 */
+    if (lcddev.lcd_panel_handle == NULL) {
+        ESP_LOGE("lvgl_demo", "LCD panel handle is unavailable");
+        return NULL;
+    }
 
     /* 判断是否需要旋转: MIPI竖屏用逻辑横屏 + 手动旋转 + PSRAM缓冲 */
     g_need_rotate = (lcddev.height > lcddev.width);
@@ -158,7 +178,9 @@ lv_disp_t *lv_port_disp_init(void)
         ver_res = lcddev.height;
     }
 
-    /* 全屏刷新 + 单缓冲: 避免部分刷新时临时缓冲区池耗尽导致死锁 */
+    /* Keep one full LVGL render buffer for a fast first page, but submit only
+     * dirty rectangles afterwards.  LVGL supplies compact pixels for each
+     * dirty area in normal (non-full-refresh) mode. */
     pixel_count = hor_res * ver_res;        /* 全屏像素数 */
     buf_size = pixel_count * sizeof(uint32_t);
     lvgl_buf[0] = heap_caps_malloc(buf_size, MALLOC_CAP_SPIRAM);
@@ -193,7 +215,7 @@ lv_disp_t *lv_port_disp_init(void)
     disp_drv.flush_cb = lvgl_disp_flush_cb;
     disp_drv.draw_buf = &draw_buf;
     disp_drv.user_data = lcddev.lcd_panel_handle;
-    disp_drv.full_refresh = 1;
+    disp_drv.full_refresh = 0;
 
     return lv_disp_drv_register(&disp_drv);
 }
@@ -211,37 +233,57 @@ void lvgl_disp_flush_cb(lv_disp_drv_t *disp_drv, const lv_area_t *area, lv_color
     uint32_t *px32 = (uint32_t *)color_p;    /* LVGL 32-bit ARGB8888 */
 
     if (g_need_rotate) {
-        lv_coord_t logical_w = lv_area_get_width(area);
-        lv_coord_t phys_w = lcddev.width;
-        lv_coord_t phys_h = lcddev.height;
-#if !LVGL_DISPLAY_ROTATE_180
-        lv_coord_t logical_total_w = disp_drv->hor_res;
-#endif
+        const lv_coord_t logical_w = lv_area_get_width(area);
+        const lv_coord_t logical_h = lv_area_get_height(area);
 
-        for (lv_coord_t ly = area->y1; ly <= area->y2; ly++) {
-            for (lv_coord_t lx = area->x1; lx <= area->x2; lx++) {
-                lv_coord_t px;
-                lv_coord_t py;
+        /* The DPI driver's external source must be a compact rectangle.
+         * Previously we wrote a dirty region into a full-screen rotated
+         * canvas, then copied all 1080x1920 pixels for every small label
+         * update.  Pack just this physical dirty rectangle at g_rot_buf[0].
+         * The display rotation remains unchanged:
+         * logical(lx, ly) -> physical(phys_w - 1 - ly, lx). */
 #if LVGL_DISPLAY_ROTATE_180
-                /* Base landscape-to-portrait mapping is (ly, W-1-lx).
-                 * Its 180-degree counterpart is (phys_w-1-ly, lx). */
-                px = phys_w - 1 - ly;
-                py = lx;
-#else
-                px = ly;
-                py = logical_total_w - 1 - lx;
-#endif
-                if (px >= 0 && px < phys_w && py >= 0 && py < phys_h) {
-                    uint32_t argb = px32[(ly - area->y1) * logical_w + (lx - area->x1)];
-                    uint8_t r = (argb >> 16) & 0xFF;
-                    uint8_t g_comp = (argb >> 8) & 0xFF;
-                    uint8_t b = argb & 0xFF;
-                    uint16_t rgb565 = ((r >> 3) << 11) | ((g_comp >> 2) << 5) | (b >> 3);
-                    g_rot_buf[py * phys_w + px] = rgb565;
-                }
+        const lv_coord_t dst_x = lcddev.width - 1 - area->y2;
+        const lv_coord_t dst_y = area->x1;
+        const lv_coord_t dst_w = logical_h;
+        const lv_coord_t dst_h = logical_w;
+
+        for (lv_coord_t dy = 0; dy < dst_h; ++dy) {
+            uint16_t *dst = g_rot_buf + (size_t)dy * dst_w;
+            for (lv_coord_t dx = 0; dx < dst_w; ++dx) {
+                const uint32_t argb = px32[(size_t)(logical_h - 1 - dx) * logical_w + dy];
+                dst[dx] = (uint16_t)(((argb >> 8) & 0xF800) |
+                                     ((argb >> 5) & 0x07E0) |
+                                     ((argb >> 3) & 0x001F));
             }
         }
-        esp_lcd_panel_draw_bitmap(panel_handle, 0, 0, phys_w, phys_h, (uint8_t *)g_rot_buf);
+        const esp_err_t ret = esp_lcd_panel_draw_bitmap(panel_handle,
+                                                         dst_x, dst_y,
+                                                         dst_x + dst_w, dst_y + dst_h,
+                                                         g_rot_buf);
+#else
+        const lv_coord_t dst_x = area->y1;
+        const lv_coord_t dst_y = disp_drv->hor_res - 1 - area->x2;
+        const lv_coord_t dst_w = logical_h;
+        const lv_coord_t dst_h = logical_w;
+
+        for (lv_coord_t dy = 0; dy < dst_h; ++dy) {
+            uint16_t *dst = g_rot_buf + (size_t)dy * dst_w;
+            for (lv_coord_t dx = 0; dx < dst_w; ++dx) {
+                const uint32_t argb = px32[(size_t)dx * logical_w + (logical_w - 1 - dy)];
+                dst[dx] = (uint16_t)(((argb >> 8) & 0xF800) |
+                                     ((argb >> 5) & 0x07E0) |
+                                     ((argb >> 3) & 0x001F));
+            }
+        }
+        const esp_err_t ret = esp_lcd_panel_draw_bitmap(panel_handle,
+                                                         dst_x, dst_y,
+                                                         dst_x + dst_w, dst_y + dst_h,
+                                                         g_rot_buf);
+#endif
+        if (ret != ESP_OK) {
+            ESP_LOGE("lvgl_demo", "Partial rotated flush failed: %s", esp_err_to_name(ret));
+        }
     } else {
         lv_coord_t area_w = lv_area_get_width(area);
         lv_coord_t area_h = lv_area_get_height(area);

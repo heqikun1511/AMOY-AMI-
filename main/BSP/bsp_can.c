@@ -55,7 +55,8 @@ int bsp_can_init(int tx_pin, int rx_pin, can_data_callback_t callback)
     /* 保存用户回调 */
     s_user_callback = callback;
 
-    /* TWAI通用配置: 250kbps, 扩展帧 */
+    /* AMI DBC uses standard frames.  Accept all here so the application can
+     * count/diagnose other traffic without hard-coding a controller filter. */
     twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT(
         (gpio_num_t)tx_pin, (gpio_num_t)rx_pin, TWAI_MODE_NORMAL
     );
@@ -64,7 +65,7 @@ int bsp_can_init(int tx_pin, int rx_pin, can_data_callback_t callback)
     /* TWAI时序配置: 250kbps */
     twai_timing_config_t t_config = TWAI_TIMING_CONFIG_250KBITS();
 
-    /* 滤波配置: 接收所有扩展帧(根据协议, 使用扩展29位ID) */
+    /* 滤波配置: 接收全部标准和扩展帧；DBC 分发由应用层完成。 */
     twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
 
     /* 安装驱动 */

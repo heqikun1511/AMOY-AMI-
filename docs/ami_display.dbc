@@ -1,0 +1,101 @@
+VERSION "A27 AMI display v2"
+
+NS_ :
+    CM_
+    VAL_
+
+BS_:
+
+BU_: STM32 AMI
+
+BO_ 1568 AMI_Motor: 8 STM32
+ SG_ MotorSpeed : 0|16@1- (1,0) [-10000|10000] "rpm" AMI
+ SG_ MotorPower : 16|16@1- (0.1,0) [-3276.8|3276.7] "kW" AMI
+ SG_ ControllerTemperature : 32|16@1- (0.1,0) [-50|200] "degC" AMI
+ SG_ MotorTemperature : 48|16@1- (0.1,0) [-50|200] "degC" AMI
+
+BO_ 1569 AMI_Pedals: 8 STM32
+ SG_ Throttle : 0|16@1+ (0.01,0) [0|100] "%" AMI
+ SG_ Brake : 16|16@1+ (0.01,0) [0|100] "%" AMI
+ SG_ LowVoltageBattery : 32|8@1+ (1,0) [0|255] "V" AMI
+ SG_ ASPositive : 40|8@1+ (1,0) [0|1] "" AMI
+ SG_ AIRPositive : 48|8@1+ (1,0) [0|1] "" AMI
+ SG_ Reserved621 : 56|8@1+ (1,0) [0|0] "" AMI
+
+BO_ 1570 AMI_AS_Status: 8 STM32
+ SG_ EBSState : 0|8@1+ (1,0) [0|3] "" AMI
+ SG_ RESState : 8|8@1+ (1,0) [0|3] "" AMI
+ SG_ SBWState : 16|8@1+ (1,0) [0|2] "" AMI
+ SG_ EHBState : 24|8@1+ (1,0) [0|2] "" AMI
+ SG_ BrakePressure1 : 32|8@1+ (0.02,0) [0|4] "MPa" AMI
+ SG_ BrakePressure2 : 40|8@1+ (0.02,0) [0|4] "MPa" AMI
+ SG_ AirPressure1 : 48|8@1+ (0.02,0) [0|4] "MPa" AMI
+ SG_ AirPressure2 : 56|8@1+ (0.02,0) [0|4] "MPa" AMI
+
+BO_ 1571 AMI_Electrical: 8 STM32
+ SG_ DriveBusVoltage : 0|16@1+ (0.1,0) [0|1000] "V" AMI
+ SG_ DriveBusCurrent : 16|16@1- (0.1,0) [-1600|1600] "A" AMI
+ SG_ Reserved623 : 32|32@1+ (1,0) [0|0] "" AMI
+
+BO_ 1572 AMI_ControlStatus: 8 STM32
+ SG_ DriveControlOwner : 0|8@1+ (1,0) [0|3] "" AMI
+ SG_ SteeringControlOwner : 8|8@1+ (1,0) [0|3] "" AMI
+ SG_ BrakeControlOwner : 16|8@1+ (1,0) [0|3] "" AMI
+ SG_ ActualGear : 24|8@1+ (1,0) [0|255] "" AMI
+ SG_ CommandedGear : 32|8@1+ (1,0) [0|255] "" AMI
+ SG_ BMSDischargeAvailable : 40|8@1+ (1,0) [0|2] "" AMI
+ SG_ SDCClosed : 48|8@1+ (1,0) [0|1] "" AMI
+ SG_ RCLinkConnected : 56|8@1+ (1,0) [0|1] "" AMI
+
+BO_ 1573 AMI_AnglesAndSources: 8 STM32
+ SG_ SteeringTargetAngle : 0|16@1- (0.1,0) [-3276.8|3276.7] "deg" AMI
+ SG_ SteeringActualAngle : 16|16@1- (0.1,0) [-3276.8|3276.7] "deg" AMI
+ SG_ RESSource : 32|2@1+ (1,0) [0|2] "" AMI
+ SG_ SBW401Source : 34|2@1+ (1,0) [0|2] "" AMI
+ SG_ EHB121Source : 36|2@1+ (1,0) [0|2] "" AMI
+ SG_ ECTLSpeedSource : 38|2@1+ (1,0) [0|2] "" AMI
+ SG_ ECTLElectricalSource : 40|2@1+ (1,0) [0|2] "" AMI
+ SG_ BMSInfoSource : 42|2@1+ (1,0) [0|2] "" AMI
+ SG_ BMSPowerSource : 44|2@1+ (1,0) [0|2] "" AMI
+ SG_ BMSRelaySource : 46|2@1+ (1,0) [0|2] "" AMI
+ SG_ VCU100Source : 48|2@1+ (1,0) [0|2] "" AMI
+ SG_ VCU101Source : 50|2@1+ (1,0) [0|2] "" AMI
+ SG_ VCU102Source : 52|2@1+ (1,0) [0|2] "" AMI
+ SG_ VCU469Source : 54|2@1+ (1,0) [0|2] "" AMI
+ SG_ VCU500Source : 56|2@1+ (1,0) [0|2] "" AMI
+ SG_ VCU501Source : 58|2@1+ (1,0) [0|2] "" AMI
+ SG_ VCU503Source : 60|2@1+ (1,0) [0|2] "" AMI
+ SG_ CRSFSource : 62|2@1+ (1,0) [0|2] "" AMI
+
+CM_ BO_ 1568 "CANA standard frame, DLC 8, 20 Hz. Speed and temperature come from CANC ECTL feedback. Power is bus voltage multiplied by (bus current minus 3.3 A). Source values older than 500 ms are sent as zero.";
+CM_ BO_ 1569 "CANA standard frame, DLC 8, 20 Hz. In RC control, throttle and brake are derived from CRSF CH2. Otherwise they come from CANA VCU feedback 0x500 and 0x501. Low voltage comes from EHB 0x121. Last byte is zero.";
+CM_ BO_ 1570 "CANA standard frame, DLC 8, 20 Hz. Pressure source ADC3/4 is brake pressure, ADC1/2 is air pressure. Each byte represents 0.02 MPa.";
+CM_ BO_ 1571 "CANA standard frame, DLC 8, 20 Hz. The voltage and current moved here to preserve 0.1 unit resolution over the full K2 controller range. Last four bytes are zero.";
+CM_ BO_ 1572 "CANA standard frame, DLC 8, 20 Hz. Control owner is the selected control path, not proof that commands are being received. Actual gear comes only from VCU 0x503; commanded gear comes from the current K2 command. 255 means gear data unavailable. BMS discharge availability is inferred and must not be used as a safety interlock.";
+CM_ BO_ 1573 "CANA standard frame, DLC 8, 20 Hz. Steering target uses the local SBW target in RC/test mode or received VCU 0x469 command in VCU mode. Actual angle uses SBW 0x401. -3276.8 deg means unavailable. Every source field: 0 never seen, 1 fresh, 2 timed out. CAN/RES/ECTL timeout 500 ms, BMS timeout 3000 ms, CRSF timeout 1000 ms.";
+CM_ SG_ 1568 ControllerTemperature "K2 feedback temperature resolution is 1 degC; transmitted in 0.1 degC units with zero fractional digit.";
+CM_ SG_ 1568 MotorTemperature "K2 feedback temperature resolution is 1 degC; transmitted in 0.1 degC units with zero fractional digit.";
+CM_ SG_ 1569 Throttle "VCU 0x500 source resolution is 0.1 percent; RC source uses calibrated pulse width and can have finer steps.";
+CM_ SG_ 1569 Brake "VCU 0x501 source resolution is 0.1 percent; RC source uses calibrated pulse width and can have finer steps.";
+CM_ SG_ 1570 EBSState "0 disabled, 1 enabled, 2 self-check/preparation, 3 triggered/emergency.";
+CM_ SG_ 1570 RESState "0 offline, 1 normal, 2 emergency or link lost, 3 GO signal.";
+CM_ SG_ 1570 SBWState "0 offline, 1 normal, 2 fault code in 0x401.";
+CM_ SG_ 1570 EHBState "0 offline, 1 normal, 2 fault bit in 0x121.";
+CM_ SG_ 1572 BMSDischargeAvailable "Derived from fresh 0x186340F3 relay feedback and 0x186440F3 discharge current limit: both main relays closed and limit above zero means available. This is not an explicit BMS permission bit.";
+CM_ SG_ 1572 ActualGear "DBC 0x503 Gear_Actual value. 255 means missing or timed out.";
+CM_ SG_ 1572 CommandedGear "Gear sent to K2 by the selected controller. 255 means missing or timed out.";
+
+VAL_ 1570 EBSState 0 "Disabled" 1 "Enabled" 2 "SelfCheck" 3 "Triggered";
+VAL_ 1570 RESState 0 "Offline" 1 "Normal" 2 "Emergency" 3 "GO";
+VAL_ 1570 SBWState 0 "Offline" 1 "Normal" 2 "Fault";
+VAL_ 1570 EHBState 0 "Offline" 1 "Normal" 2 "Fault";
+VAL_ 1569 ASPositive 0 "Low" 1 "High";
+VAL_ 1569 AIRPositive 0 "Low" 1 "High";
+VAL_ 1572 DriveControlOwner 0 "None" 1 "VCU" 2 "RC" 3 "Test";
+VAL_ 1572 SteeringControlOwner 0 "None" 1 "VCU" 2 "RC" 3 "Test";
+VAL_ 1572 BrakeControlOwner 0 "None" 1 "VCU" 2 "RC" 3 "Test";
+VAL_ 1572 ActualGear 0 "Invalid" 1 "Park" 2 "Reverse" 3 "Neutral" 4 "Drive" 255 "Unavailable";
+VAL_ 1572 CommandedGear 0 "Invalid" 1 "Park" 2 "Reverse" 3 "Neutral" 4 "Drive" 255 "Unavailable";
+VAL_ 1572 BMSDischargeAvailable 0 "Unknown" 1 "Available" 2 "Unavailable";
+VAL_ 1572 SDCClosed 0 "Open" 1 "Closed";
+VAL_ 1572 RCLinkConnected 0 "Disconnected" 1 "Connected";

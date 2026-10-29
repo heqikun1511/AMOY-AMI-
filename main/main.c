@@ -2,7 +2,6 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "freertos/semphr.h"
 #include "nvs_flash.h"
 #include <stdio.h>
 #include <string.h>
@@ -14,22 +13,38 @@
 #include "lvgl.h"
 #include "lvgl_demo.h"
 #include "bsp_can.h"
-#include "vehicle_can.h"
+#include "ami_display_can.h"
 #include "myiic.h"
 #include "xl9555.h"
 #include "ui.h"
 #include "ui/vars.h"
 #include "ui/fonts.h"
 #include "lcd.h"
-#include "ws2815_test.h"
+#include "tinyusb.h"
+#include "tinyusb_cdc_acm.h"
+#include "tinyusb_console.h"
+#include "tinyusb_default_config.h"
 #include "rotary_input.h"
 
 static const char *TAG = "MAIN";
 
-/* Keep the panel's active-high backlight enable asserted from the first
- * application instruction.  LCD/DSI initialisation later configures RESET
- * and the video link normally. */
-static void lcd_backlight_boot_enable(void)
+/* The board Type-C connector is wired to the P4 native USB DP/DM pair.
+ * Use the TinyUSB CDC device on that connector for the application console. */
+static void usb_cdc_console_init(void)
+{
+    const tinyusb_config_t tusb_cfg = TINYUSB_DEFAULT_CONFIG();
+    ESP_ERROR_CHECK(tinyusb_driver_install(&tusb_cfg));
+
+    const tinyusb_config_cdcacm_t cdc_cfg = {
+        .cdc_port = TINYUSB_CDC_ACM_0,
+    };
+    ESP_ERROR_CHECK(tinyusb_cdcacm_init(&cdc_cfg));
+    ESP_ERROR_CHECK(tinyusb_console_init(cdc_cfg.cdc_port));
+}
+
+/* Prepare the panel backlight pin at boot, but keep the panel dark until the
+ * first complete UI frame has reached the DSI framebuffer. */
+static void lcd_backlight_boot_prepare(void)
 {
     const gpio_config_t config = {
         .pin_bit_mask = 1ULL << LCD_BL_PIN,
@@ -40,7 +55,7 @@ static void lcd_backlight_boot_enable(void)
     };
 
     ESP_ERROR_CHECK(gpio_config(&config));
-    LCD_BACKLIGHT_ON();
+    LCD_BACKLIGHT_OFF();
 }
 
 /*
@@ -54,7 +69,7 @@ static void lcd_backlight_boot_enable(void)
  * 保持为 0 时绝不初始化 DSI PHY、绝不读屏 ID、绝不发送任何 MIPI 命令。
  * 确认背光后才改为 1 进入下一阶段。
  */
-#define LCD_MINIMAL_TEST_ENABLE_MIPI 0
+#define LCD_MINIMAL_TEST_ENABLE_MIPI 1
 
 /* Stand-alone diagnostic: only the complete display driver and CAN-B run.
  * The old dashboard, touch, rotary, LEDs, buttons and I2C expander are not
@@ -64,66 +79,35 @@ static void lcd_backlight_boot_enable(void)
  * frames at the CAN physical/protocol layer. */
 #define AMI_RECEIVE_ONLY 1
 
-/* GPIO13 WS2812 board wiring test: hold the data pin at a steady 3.3 V. */
-#define GPIO13_HIGH_LEVEL_TEST 0
-
-/* GPIO13 WS2812 test mode: all 8 LEDs remain at full-bright yellow. */
-#define WS2815_FULL_YELLOW_TEST 0
-
 /* Keep the optional rotary input disabled while diagnosing the CAN bus. */
-#define ROTARY_INPUT_ENABLE 1
+#define ROTARY_INPUT_ENABLE 0
 
-/* 板内转速演示：1=自动循环0~5000 RPM，0=只使用真实CAN报文。 */
-#define RPM_INTERNAL_DEMO_ENABLE 0
-#define RPM_DEMO_STEP             25
-#define RPM_DEMO_STEP_MS          20
-#define RPM_DEMO_ENDPOINT_HOLD_MS 1000
-#define RPM_DEMO_YELLOW_HOLD_RPM  3250
-#define RPM_DEMO_YELLOW_HOLD_MS   1200
+/* This custom AMI PCB does not populate the development-board XL9555.  Keep
+ * its source available for the reference build, but do not issue I2C traffic
+ * to a device which is not fitted. */
+#define BOARD_HAS_XL9555 0
 
-typedef struct
-{
-    float command_rpm;
-    uint16_t command_torque_permille;
-    uint8_t command_mode;
-    uint8_t command_gear;
-    bool command_main_contactor;
-    float command_bus_voltage;
-    bool command_valid;
-
-    float actual_rpm;
-    uint16_t actual_torque_permille;
-    uint8_t actual_mode;
-    uint8_t status_flags;
-    uint8_t alarm_flags;
-    uint8_t combined_alarm;
-    bool status1_valid;
-
-    int controller_temp_c;
-    int motor_temp_c;
-    float dc_bus_voltage;
-    float dc_bus_current;
-    float ac_rms_current;
-    bool status2_valid;
-} motor_can_data_t;
-
-/* CAN回调更新协议快照；UI和转速灯任务读取快照。 */
-static motor_can_data_t g_motor_can_data;
-static volatile int g_current_rpm = 0;
-static volatile bool g_can_rx_seen = false;
-static volatile TickType_t g_last_can_rx_tick = 0;
-/* 互斥信号量, 保护转速数据 */
-static SemaphoreHandle_t g_rpm_mutex = NULL;
+/* CAN parsing and key debounce retain their 20 ms period.  Rendering changing
+ * dashboard values at 20 Hz is visually smooth at the panel's frame rate and
+ * avoids invalidating text faster than it can be displayed. */
+#define UI_DASHBOARD_UPDATE_MS     50
+#define AMI_DBC_FRAME_TIMEOUT_MS    250
+static bool s_driving_demo_started = false;
 
 /* 独立BOOT按键，直接连接ESP32-P4 GPIO35，低电平有效。 */
 #define BOOT_GPIO_PIN GPIO_NUM_35
 
+/* AMI task selector: external switch from GPIO5 to GND, active low. */
+#define AMI_BUTTON_GPIO              GPIO_NUM_5
+#define AMI_BUTTON_ACTIVE_LEVEL      0
+#define AMI_BUTTON_DEBOUNCE_MS       40
+#define AMI_BUTTON_LONG_PRESS_MS     800
+
 /* EXIO8/9/10通过XL9555 IO扩展器连接，均按低电平有效处理。 */
 
-/* CAN-B: the board routes GPIO20 -> CANB_TX and GPIO19 -> CANB_RX through
- * the ISO1042 transceiver. */
-#define CAN_TX_PIN GPIO_NUM_20
-#define CAN_RX_PIN GPIO_NUM_19
+/* CAN transceiver connections requested for this board revision. */
+#define CAN_TX_PIN GPIO_NUM_15
+#define CAN_RX_PIN GPIO_NUM_14
 
 #if SCREEN_CAN_TEST_ONLY
 #define CAN_SCREEN_TEST_TX_ID 0x18FF50E5U
@@ -150,7 +134,7 @@ static lv_obj_t *s_can_screen_test_tx;
 static void can_screen_test_callback(uint32_t can_id, bool is_extended,
                                      const uint8_t *data, uint8_t len)
 {
-    (void)vehicle_can_receive(can_id, is_extended, data, len);
+    (void)ami_display_can_receive(can_id, is_extended, data, len);
     taskENTER_CRITICAL(&s_can_screen_test_lock);
     s_can_screen_test_data.rx_count++;
     s_can_screen_test_data.last_id = can_id;
@@ -237,6 +221,7 @@ static void can_screen_test_ui_task(void *arg)
                      CAN_SCREEN_TEST_TX_ID, (unsigned long)data.tx_ok_count,
                      (unsigned long)data.tx_fail_count);
 #endif
+
             lv_label_set_text(s_can_screen_test_tx, text);
             lvgl_port_unlock();
         }
@@ -285,11 +270,16 @@ static void can_screen_test_start(void)
         s_can_screen_test_tx = can_screen_test_label(screen, 690, &ui_font_orbitron_bold_25);
 
         lv_obj_t *pins = can_screen_test_label(screen, 820, &ui_font_orbitron_bold_25);
-        lv_label_set_text(pins, "CAN-B pins: GPIO20 = TX, GPIO19 = RX   |   Bit rate: 250 kbit/s   |   Extended CAN frames");
+        lv_label_set_text(pins, "CAN-B pins: GPIO15 = TX, GPIO14 = RX   |   Bit rate: 250 kbit/s   |   Standard + extended frames");
+        lv_refr_now(NULL);
         lvgl_port_unlock();
     }
+    if (!lcd_wait_for_next_refresh(500)) {
+        ESP_LOGW(TAG, "CAN diagnostic first-frame VSYNC timeout");
+    }
+    LCD_BACKLIGHT_ON();
 
-    vehicle_can_init();
+    ami_display_can_init();
     int can_ret = bsp_can_init(CAN_TX_PIN, CAN_RX_PIN, can_screen_test_callback);
     ESP_LOGI(TAG, "CAN-B diagnostic init: TX=%d RX=%d result=%d", CAN_TX_PIN, CAN_RX_PIN, can_ret);
     if (can_ret == 0 && !AMI_RECEIVE_ONLY) {
@@ -304,10 +294,6 @@ static void can_screen_test_start(void)
 #if LCD_MINIMAL_TEST
 static void lcd_minimal_test(void)
 {
-#if LCD_MINIMAL_TEST_ENABLE_MIPI
-    static const uint16_t colors[] = { RED, GREEN, BLUE, WHITE, BLACK };
-    static const char *const names[] = { "RED", "GREEN", "BLUE", "WHITE", "BLACK" };
-#endif
     const gpio_config_t lcd_ctrl_cfg = {
 #if LCD_MINIMAL_TEST_ENABLE_MIPI
         .pin_bit_mask = (1ULL << LCD_BL_PIN) | (1ULL << LCD_RST_PIN),
@@ -342,7 +328,7 @@ static void lcd_minimal_test(void)
     /* 放在 DSI 前，避免 USB 枚举初期的日志被 monitor 漏掉。 */
     esp_chip_info_t chip_info;
     esp_chip_info(&chip_info);
-    ESP_LOGW(TAG, "ESP32-P4 silicon revision: %u (sdkconfig minimum: 3.0)", chip_info.revision);
+    ESP_LOGW(TAG, "ESP32-P4 silicon revision: %u (DSI build target: v3.x)", chip_info.revision);
     ESP_LOGW(TAG, "Reset reason immediately before DSI: %d", esp_reset_reason());
     ESP_LOGI(TAG, "LCD minimal test: initialising MIPI LCD only");
     lcd_init();
@@ -352,23 +338,19 @@ static void lcd_minimal_test(void)
             vTaskDelay(pdMS_TO_TICKS(1000));
         }
     }
+    /* The normal LCD driver deliberately leaves BL off until its UI first
+     * frame.  This standalone hardware-pattern test owns its own first frame. */
+    LCD_BACKLIGHT_ON();
     ESP_LOGI(TAG, "LCD ready: %lux%lu; backlight is ON", lcddev.width, lcddev.height);
 
-    /* Generate bars inside the P4 DSI host itself. This bypasses PSRAM frame
-     * buffers, DMA and lcd_clear(), leaving only the DSI video transmitter and
-     * the panel as the variables under test. */
+    /* Generate vertical colour bars inside the P4 DSI host.  This bypasses
+     * the LCD frame buffers and draw_bitmap(), leaving only panel reset,
+     * controller initialisation and the DSI physical/video link under test. */
     ESP_ERROR_CHECK(esp_lcd_dpi_panel_set_pattern(lcddev.lcd_panel_handle,
                                                   MIPI_DSI_PATTERN_BAR_VERTICAL));
-    ESP_LOGI(TAG, "DSI hardware vertical colour-bar pattern is active");
-
+    ESP_LOGI(TAG, "MIPI DSI hardware colour-bar test is active");
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(1000));
-    }
-
-    for (size_t i = 0;; i = (i + 1) % (sizeof(colors) / sizeof(colors[0]))) {
-        ESP_LOGI(TAG, "LCD test colour: %s", names[i]);
-        lcd_clear(colors[i]);
-        vTaskDelay(pdMS_TO_TICKS(1500));
     }
 #else
     ESP_LOGI(TAG, "GPIO-only test active: MIPI DSI is deliberately disabled");
@@ -381,162 +363,45 @@ static void lcd_minimal_test(void)
 }
 #endif
 
-/**
- * @brief       CAN数据接收回调(在CAN任务上下文中调用)
- * @param       can_id : CAN扩展帧ID
- * @param       data   : 数据缓冲区
- * @param       len    : 数据长度
- * @retval      无
- */
+/* CAN callback executes in the TWAI RX task.  The DBC decoder owns all
+ * accepted AMI frames; no legacy K2 data is mixed into this snapshot. */
 static void can_data_callback(uint32_t can_id, bool is_extended,
                               const uint8_t *data, uint8_t len)
 {
-    if (!is_extended) {
-        (void)vehicle_can_receive(can_id, false, data, len);
-        return;
-    }
-
-    if (!data)
-        return;
-
-    /* 本协议的三种电机报文均为8字节；截短报文不进入信号解析。 */
-    if (len < 8)
-        return;
-
-    const uint16_t value_01 = (uint16_t)data[0] | ((uint16_t)data[1] << 8);
-    const uint16_t value_23 = (uint16_t)data[2] | ((uint16_t)data[3] << 8);
-    float parsed_rpm = ((float)value_01 * 0.5f) - 10000.0f;
-    if (can_id != VCU_TO_MCU_CMD_ID &&
-        can_id != MCU_TO_VCU_STATUS1_ID &&
-        can_id != MCU_TO_VCU_STATUS2_ID)
-        return;
-
-    g_last_can_rx_tick = xTaskGetTickCount();
-    g_can_rx_seen = true;
-
-    if (g_rpm_mutex)
-        xSemaphoreTake(g_rpm_mutex, portMAX_DELAY);
-
-    switch (can_id)
-    {
-    case VCU_TO_MCU_CMD_ID:
-        /* byte1-2 RPM, byte3-4 torque, byte5 mode, byte6 gear/contactor,
-         * byte7-8 DC bus voltage.  Multibyte values are little-endian. */
-        g_motor_can_data.command_rpm = parsed_rpm;
-        g_motor_can_data.command_torque_permille = value_23;
-        g_motor_can_data.command_mode = data[4];
-        g_motor_can_data.command_gear = data[5] & 0x03;
-        g_motor_can_data.command_main_contactor = (data[5] & 0x08) != 0;
-        g_motor_can_data.command_bus_voltage =
-            ((uint16_t)data[6] | ((uint16_t)data[7] << 8)) * 0.1f;
-        g_motor_can_data.command_valid = true;
-        break;
-
-    case MCU_TO_VCU_STATUS1_ID:
-        /* byte6 controller state; byte7 temperature alarms/self-test;
-         * byte8 combined alarm. */
-        g_motor_can_data.actual_rpm = parsed_rpm;
-        g_motor_can_data.actual_torque_permille = value_23;
-        g_motor_can_data.actual_mode = data[4];
-        g_motor_can_data.status_flags = data[5];
-        g_motor_can_data.alarm_flags = data[6];
-        g_motor_can_data.combined_alarm = data[7] & 0x03;
-        g_motor_can_data.status1_valid = true;
-        break;
-
-    case MCU_TO_VCU_STATUS2_ID: {
-        /* Temperatures use -50 C offset; current uses 0.1 A/bit, -1600 A offset. */
-        uint16_t dc_current_raw = (uint16_t)data[4] | ((uint16_t)data[5] << 8);
-        uint16_t ac_current_raw = (uint16_t)data[6] | ((uint16_t)data[7] << 8);
-        g_motor_can_data.controller_temp_c = (int)data[0] - 50;
-        g_motor_can_data.motor_temp_c = (int)data[1] - 50;
-        g_motor_can_data.dc_bus_voltage = value_23 * 0.1f;
-        g_motor_can_data.dc_bus_current = dc_current_raw * 0.1f - 1600.0f;
-        g_motor_can_data.ac_rms_current = ac_current_raw * 0.1f - 1600.0f;
-        g_motor_can_data.status2_valid = true;
-        break;
-    }
-
-    default:
-        break;
-    }
-
-    if (g_rpm_mutex)
-        xSemaphoreGive(g_rpm_mutex);
-
-    /* 高频转速帧只保留DEBUG日志，避免串口输出阻塞UI刷新。 */
-    if (can_id != MCU_TO_VCU_STATUS2_ID)
-        ESP_LOGD(TAG, "CAN ID=0x%08X, parsed RPM=%.1f", can_id, parsed_rpm);
+    (void)ami_display_can_receive(can_id, is_extended, data, len);
 }
 
-#if RPM_INTERNAL_DEMO_ENABLE
-/*
- * 通过正式CAN解析入口注入测试帧，使仪表和WS2815转速灯使用完全相同的数据链路。
- * 序列为0 -> 5000 -> 0 RPM；使用20ms细步进形成连续变化。
- * 端点及完整黄色灯区会停留，便于观察待机、五颗黄灯和红色爆闪。
- */
-static void rpm_internal_demo_task(void *arg)
+/* The display is driven only by the AMI DBC stream once a task is entered. */
+static void driving_demo_start(void)
 {
-    int rpm = 0;
-    int direction = 1;
-
-    const uint8_t status2_demo[8] = {
-        95, 100,             /* 控制器45 C，电机50 C */
-        0xA0, 0x0F,         /* DC母线400.0 V */
-        0xE4, 0x3E,         /* DC电流10.0 A */
-        0x74, 0x40          /* AC RMS电流50.0 A */
-    };
-
-    while (1)
-    {
-        uint16_t raw_rpm = (uint16_t)((rpm + 10000) * 2);
-        uint8_t command[8] = {
-            (uint8_t)(raw_rpm & 0xFF), (uint8_t)(raw_rpm >> 8),
-            0x00, 0x00,     /* 扭矩0 */
-            0x04,           /* 速度模式 */
-            0x0A,           /* 前进挡，主接触器闭合 */
-            0xA0, 0x0F      /* 命令母线400.0 V */
-        };
-        uint8_t status1[8] = {
-            (uint8_t)(raw_rpm & 0xFF), (uint8_t)(raw_rpm >> 8),
-            0x00, 0x00,     /* 实际扭矩0 */
-            0x04,           /* 速度模式 */
-            0x01,           /* MCU ready */
-            0x80,           /* 自检完成 */
-            0x00            /* 无综合报警 */
-        };
-
-        can_data_callback(VCU_TO_MCU_CMD_ID, true, command, sizeof(command));
-        can_data_callback(MCU_TO_VCU_STATUS1_ID, true, status1, sizeof(status1));
-        can_data_callback(MCU_TO_VCU_STATUS2_ID, true, status2_demo, sizeof(status2_demo));
-
-        if ((rpm % 500) == 0 || rpm == RPM_DEMO_YELLOW_HOLD_RPM)
-            ESP_LOGI(TAG, "RPM demo: %d", rpm);
-
-        TickType_t delay = pdMS_TO_TICKS(RPM_DEMO_STEP_MS);
-        if (rpm == 0 || rpm == 5000)
-            delay = pdMS_TO_TICKS(RPM_DEMO_ENDPOINT_HOLD_MS);
-        else if (rpm == RPM_DEMO_YELLOW_HOLD_RPM)
-            delay = pdMS_TO_TICKS(RPM_DEMO_YELLOW_HOLD_MS);
-        vTaskDelay(delay);
-
-        rpm += direction * RPM_DEMO_STEP;
-        if (rpm >= 5000)
-        {
-            rpm = 5000;
-            direction = -1;
-        }
-        else if (rpm <= 0)
-        {
-            rpm = 0;
-            direction = 1;
-        }
+    if (s_driving_demo_started) {
+        return;
     }
+    s_driving_demo_started = true;
+    ESP_LOGI(TAG, "Driving data source: AMI DBC (0x620-0x625)");
 }
-#endif
 
 #define AMI_SELECTION_COUNT 6
 #define INSPECT_STAGE_COUNT 5
+
+static const char *const s_ami_task_names[AMI_SELECTION_COUNT] = {
+    "MANUAL DRIVING",
+    "ACCELERATION",
+    "SKIDPAD",
+    "TRACKDRIVE",
+    "EBS TEST",
+    "INSPECTION",
+};
+
+/* Compact labels for the Autonomous dashboard's limited left-side space. */
+static const char *const s_autonomous_task_labels[AMI_SELECTION_COUNT] = {
+    "TASK: MANUAL",
+    "TASK: ACCEL",
+    "TASK: SKIDPAD",
+    "TASK: TRACK",
+    "TASK: EBS",
+    "TASK: INSPECT",
+};
 
 static lv_obj_t *s_can_dashboard;
 
@@ -613,7 +478,7 @@ static void autonomous_can_dashboard_init(void)
         lv_obj_set_pos(title, 55, 24);
         lv_obj_set_style_text_color(title, lv_color_hex(0xffffff), LV_PART_MAIN);
         lv_obj_set_style_text_font(title, &ui_font_orbitron_bold_30, LV_PART_MAIN);
-        lv_label_set_text(title, "MOTOR CAN DIAGNOSTICS");
+        lv_label_set_text(title, "AMI DISPLAY CAN DIAGNOSTICS");
 
         s_can_widgets.online = lv_label_create(s_can_dashboard);
         lv_obj_set_pos(s_can_widgets.online, 1600, 25);
@@ -627,13 +492,13 @@ static void autonomous_can_dashboard_init(void)
         lv_label_set_text(s_can_widgets.online, "CAN OFFLINE");
 
         s_can_widgets.command_rpm = can_dashboard_card(s_can_dashboard, 50, 95, 430, 165,
-                                                        "TARGET RPM", true);
+                                                        "MOTOR SPEED (RPM)", true);
         s_can_widgets.actual_rpm = can_dashboard_card(s_can_dashboard, 515, 95, 430, 165,
-                                                       "ACTUAL RPM", true);
+                                                       "MOTOR POWER (kW)", true);
         s_can_widgets.command_torque = can_dashboard_card(s_can_dashboard, 980, 95, 430, 165,
-                                                           "TARGET TORQUE (permille)", true);
+                                                           "THROTTLE (%)", true);
         s_can_widgets.actual_torque = can_dashboard_card(s_can_dashboard, 1445, 95, 430, 165,
-                                                          "ACTUAL TORQUE (permille)", true);
+                                                          "BRAKE (%)", true);
 
         s_can_widgets.controller_temp = can_dashboard_card(s_can_dashboard, 50, 290, 280, 165,
                                                             "CTRL TEMP (C)", true);
@@ -642,56 +507,65 @@ static void autonomous_can_dashboard_init(void)
         s_can_widgets.dc_bus_voltage = can_dashboard_card(s_can_dashboard, 670, 290, 280, 165,
                                                           "DC BUS (V)", true);
         s_can_widgets.dc_bus_current = can_dashboard_card(s_can_dashboard, 980, 290, 280, 165,
-                                                          "DC CURRENT (A)", true);
+                                                          "DRIVE BUS (A)", true);
         s_can_widgets.ac_rms_current = can_dashboard_card(s_can_dashboard, 1290, 290, 280, 165,
-                                                          "AC RMS (A)", true);
+                                                          "LV BATTERY (V)", true);
         s_can_widgets.dc_power = can_dashboard_card(s_can_dashboard, 1600, 290, 275, 165,
-                                                    "DC POWER (kW)", true);
+                                                    "STEER ACTUAL (deg)", true);
 
         s_can_widgets.command_state = can_dashboard_card(s_can_dashboard, 50, 485, 575, 225,
-                                                          "VCU COMMAND", false);
+                                                          "CONTROL OWNERS", false);
         s_can_widgets.mcu_state = can_dashboard_card(s_can_dashboard, 672, 485, 575, 225,
-                                                      "MCU STATE", false);
+                                                      "GEAR / LINKS", false);
         s_can_widgets.readiness = can_dashboard_card(s_can_dashboard, 1295, 485, 580, 225,
-                                                      "READINESS", false);
+                                                      "SAFETY", false);
         s_can_widgets.faults = can_dashboard_card(s_can_dashboard, 50, 740, 897, 275,
-                                                   "CONTROLLER FAULTS", false);
+                                                   "AS STATUS / PRESSURES", false);
         s_can_widgets.alarms = can_dashboard_card(s_can_dashboard, 977, 740, 898, 275,
-                                                   "ALARMS", false);
+                                                   "SOURCE HEALTH", false);
     }
 
     lvgl_port_unlock();
 }
 
-static const char *motor_mode_name(uint8_t mode, char *buffer, size_t size)
+static const char *ami_owner_name(uint8_t owner)
 {
-    buffer[0] = '\0';
-    const struct { uint8_t bit; const char *name; } modes[] = {
-        {0, "FREE"}, {1, "TORQUE"}, {2, "SPEED"}, {3, "BRAKE"},
-        {4, "ZEROLOCK"}, {7, "FAULT"},
-    };
-    for (size_t i = 0; i < sizeof(modes) / sizeof(modes[0]); ++i)
-    {
-        if (mode & (1U << modes[i].bit))
-        {
-            if (buffer[0] != '\0')
-                strlcat(buffer, "/", size);
-            strlcat(buffer, modes[i].name, size);
-        }
+    switch (owner) {
+    case 1: return "VCU";
+    case 2: return "RC";
+    case 3: return "TEST";
+    default: return "NONE";
     }
-    if (buffer[0] == '\0')
-        strlcpy(buffer, "NORMAL", size);
-    return buffer;
 }
 
-static const char *motor_gear_name(uint8_t gear)
+static const char *ami_gear_name(uint8_t gear)
 {
-    switch (gear & 0x03)
-    {
-    case 0: return "NEUTRAL";
-    case 1: return "REVERSE";
-    case 2: return "FORWARD";
+    switch (gear) {
+    case 1: return "PARK";
+    case 2: return "REVERSE";
+    case 3: return "NEUTRAL";
+    case 4: return "DRIVE";
+    case 255: return "UNAVAILABLE";
     default: return "INVALID";
+    }
+}
+
+static const char *ami_source_name(uint8_t state)
+{
+    switch (state) {
+    case 1: return "FRESH";
+    case 2: return "TIMEOUT";
+    default: return "NEVER";
+    }
+}
+
+static const char *ami_as_state_name(uint8_t state)
+{
+    switch (state) {
+    case 1: return "NORMAL";
+    case 2: return "FAULT";
+    case 3: return "GO";
+    default: return "OFFLINE";
     }
 }
 
@@ -706,257 +580,295 @@ static void dashboard_set_text(lv_obj_t *label, const char *text, uint32_t color
     if (!label)
         return;
     label_set_if_changed(label, text);
-    lv_obj_set_style_text_color(label, lv_color_hex(color), LV_PART_MAIN);
+    const lv_color_t wanted = lv_color_hex(color);
+    if (lv_color_to32(lv_obj_get_style_text_color(label, LV_PART_MAIN)) !=
+        lv_color_to32(wanted))
+    {
+        lv_obj_set_style_text_color(label, wanted, LV_PART_MAIN);
+    }
 }
 
-/* UI数字显示使用一阶插值；CAN解析快照本身不被滤波，控制/故障逻辑不受影响。 */
-typedef struct
+static void dbc_value_or_dash(char *out, size_t size, bool valid,
+                              const char *format, float value)
 {
-    float command_rpm, command_torque, command_bus_voltage;
-    float actual_rpm, actual_torque;
-    float controller_temp, motor_temp, dc_bus_voltage, dc_bus_current, ac_rms_current;
-    bool command_valid, status1_valid, status2_valid;
-} motor_display_smooth_t;
-
-static motor_display_smooth_t s_motor_display;
-
-static float smooth_step(float current, float target)
-{
-    /* UI每20ms调用一次，alpha=0.12对应约150ms的平滑时间常数。 */
-    return current + 0.12f * (target - current);
+    if (valid) {
+        snprintf(out, size, format, value);
+    } else {
+        strlcpy(out, "--", size);
+    }
 }
 
-static void motor_display_smooth_update(const motor_can_data_t *data)
+/* AUTONOMOUS status cards are deliberately driven only by decoded DBC data.
+ * No received frame, a stale frame, or an explicit non-normal state is red. */
+static void autonomous_status_card(lv_obj_t *card, lv_obj_t *title, bool normal)
 {
-    if (!data)
+    const lv_color_t color = lv_color_hex(normal ? 0x39ff65 : 0xff3030);
+    if (card) {
+        lv_obj_set_style_border_color(card, color, LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_border_width(card, 4, LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_bg_color(card, color, LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_bg_opa(card, normal ? LV_OPA_20 : LV_OPA_30,
+                                LV_PART_MAIN | LV_STATE_DEFAULT);
+    }
+    if (title) {
+        lv_obj_set_style_text_color(title, color, LV_PART_MAIN | LV_STATE_DEFAULT);
+    }
+}
+
+static void autonomous_status_indicators(const ami_display_can_snapshot_t *data,
+                                         bool pedals_fresh, bool as_fresh,
+                                         bool control_fresh)
+{
+    const bool ebs_ok = as_fresh && data->as_status.ebs_state == 1;
+    const bool sbw_ok = as_fresh && data->as_status.sbw_state == 1;
+    const bool ehb_ok = as_fresh && data->as_status.ehb_state == 1;
+    const bool as_ok = pedals_fresh && data->pedals.as_positive;
+    /* BMSDischargeAvailable is an upstream estimate.  It is used here only
+     * for the visual AMS/R2D indication, never as a control interlock. */
+    const bool ams_ok = control_fresh &&
+                        data->control_status.bms_discharge_available == 1;
+    const bool ts_ok = control_fresh && pedals_fresh &&
+                       data->control_status.sdc_closed && data->pedals.air_positive;
+    const bool r2d_ok = ts_ok && ams_ok && data->control_status.actual_gear == 4;
+
+    autonomous_status_card(objects.ebs, objects.obj3, ebs_ok);
+    autonomous_status_card(objects.as, objects.obj7, as_ok);
+    autonomous_status_card(objects.ams, objects.obj6, ams_ok);
+    autonomous_status_card(objects.ts_2, objects.obj10, ts_ok);
+    autonomous_status_card(objects.r2d, objects.r2d_1, r2d_ok);
+    autonomous_status_card(objects.sbw, objects.obj8, sbw_ok);
+    autonomous_status_card(objects.ebh, objects.obj9, ehb_ok);
+}
+
+static void autonomous_can_dashboard_update(const ami_display_can_snapshot_t *data,
+                                            bool online)
+{
+    if (!data || !objects.autonomous) {
         return;
-
-    /* 首帧直接对齐，之后每20ms向最新CAN目标插值12%。 */
-    if (data->command_valid)
-    {
-        if (!s_motor_display.command_valid)
-        {
-            s_motor_display.command_rpm = data->command_rpm;
-            s_motor_display.command_torque = data->command_torque_permille;
-            s_motor_display.command_bus_voltage = data->command_bus_voltage;
-            s_motor_display.command_valid = true;
-        }
-        else
-        {
-            s_motor_display.command_rpm = smooth_step(s_motor_display.command_rpm, data->command_rpm);
-            s_motor_display.command_torque = smooth_step(s_motor_display.command_torque, data->command_torque_permille);
-            s_motor_display.command_bus_voltage = smooth_step(s_motor_display.command_bus_voltage, data->command_bus_voltage);
-        }
-    }
-    if (data->status1_valid)
-    {
-        if (!s_motor_display.status1_valid)
-        {
-            s_motor_display.actual_rpm = data->actual_rpm;
-            s_motor_display.actual_torque = data->actual_torque_permille;
-            s_motor_display.status1_valid = true;
-        }
-        else
-        {
-            s_motor_display.actual_rpm = smooth_step(s_motor_display.actual_rpm, data->actual_rpm);
-            s_motor_display.actual_torque = smooth_step(s_motor_display.actual_torque, data->actual_torque_permille);
-        }
-    }
-    if (data->status2_valid)
-    {
-        if (!s_motor_display.status2_valid)
-        {
-            s_motor_display.controller_temp = data->controller_temp_c;
-            s_motor_display.motor_temp = data->motor_temp_c;
-            s_motor_display.dc_bus_voltage = data->dc_bus_voltage;
-            s_motor_display.dc_bus_current = data->dc_bus_current;
-            s_motor_display.ac_rms_current = data->ac_rms_current;
-            s_motor_display.status2_valid = true;
-        }
-        else
-        {
-            s_motor_display.controller_temp = smooth_step(s_motor_display.controller_temp, data->controller_temp_c);
-            s_motor_display.motor_temp = smooth_step(s_motor_display.motor_temp, data->motor_temp_c);
-            s_motor_display.dc_bus_voltage = smooth_step(s_motor_display.dc_bus_voltage, data->dc_bus_voltage);
-            s_motor_display.dc_bus_current = smooth_step(s_motor_display.dc_bus_current, data->dc_bus_current);
-            s_motor_display.ac_rms_current = smooth_step(s_motor_display.ac_rms_current, data->ac_rms_current);
-        }
     }
 
-    /* 仪表和实体转速灯共享同一个插值后的RPM，保证两者同步。 */
-    float displayed_rpm = 0.0f;
-    if (s_motor_display.status1_valid)
-        displayed_rpm = s_motor_display.actual_rpm;
-    else if (s_motor_display.command_valid)
-        displayed_rpm = s_motor_display.command_rpm;
-    g_current_rpm = (int)(displayed_rpm >= 0.0f ? displayed_rpm + 0.5f
-                                               : displayed_rpm - 0.5f);
-}
+    const bool motor_fresh = ami_display_can_frame_is_fresh(&data->motor.meta,
+                                                              AMI_DBC_FRAME_TIMEOUT_MS);
+    const bool pedals_fresh = ami_display_can_frame_is_fresh(&data->pedals.meta,
+                                                               AMI_DBC_FRAME_TIMEOUT_MS);
+    const bool as_fresh = ami_display_can_frame_is_fresh(&data->as_status.meta,
+                                                           AMI_DBC_FRAME_TIMEOUT_MS);
+    const bool electrical_fresh = ami_display_can_frame_is_fresh(&data->electrical.meta,
+                                                                   AMI_DBC_FRAME_TIMEOUT_MS);
+    const bool control_fresh = ami_display_can_frame_is_fresh(&data->control_status.meta,
+                                                                AMI_DBC_FRAME_TIMEOUT_MS);
+    const bool angles_fresh = ami_display_can_frame_is_fresh(&data->angles_and_sources.meta,
+                                                               AMI_DBC_FRAME_TIMEOUT_MS);
+    /* The gateway transmits zero for an upstream timeout.  When its source
+     * status is available, prefer an explicit dash to a believable zero. */
+    const bool motor_speed_valid = motor_fresh &&
+        (!angles_fresh || data->angles_and_sources.source_state[3] == 1);
+    const bool electrical_values_valid = electrical_fresh &&
+        (!angles_fresh || data->angles_and_sources.source_state[4] == 1);
 
-static void autonomous_can_dashboard_update(const motor_can_data_t *data, bool online)
-{
-    if (!data || !objects.autonomous)
-        return;
+    autonomous_status_indicators(data, pedals_fresh, as_fresh, control_fresh);
 
-    /* These dashboard values have no field in the motor-controller frames. */
-    label_set_if_changed(objects.batt, "--"); /* SOC is not sent in these IDs. */
-    label_set_if_changed(objects.lv_volt, "--");
+    /* The DBC has no SOC or LV current; do not fabricate either value. */
+    label_set_if_changed(objects.batt, "--");
+    char lv_batt[20];
+    dbc_value_or_dash(lv_batt, sizeof(lv_batt), pedals_fresh, "%.0f",
+                      (float)data->pedals.low_voltage_battery_v);
+    label_set_if_changed(objects.lv_volt, lv_batt);
     label_set_if_changed(objects.lv_a, "--");
 
-    char mode[96], actual_mode[96];
-    char cmd_rpm[20], cmd_torque[20], cmd_bus[20];
-    char actual_rpm[20], actual_torque[20];
-    char controller_temp[20], motor_temp[20], dc_bus[20], dc_current[20], ac_current[20];
-    const char *alarm_name[] = {"NORMAL", "WARN-L3", "LIMIT-L2", "STOP-L1"};
-    bool rpm_valid = data->status1_valid || data->command_valid;
-
-    if (data->command_valid) {
-        snprintf(cmd_rpm, sizeof(cmd_rpm), "%.1f", s_motor_display.command_rpm);
-        snprintf(cmd_torque, sizeof(cmd_torque), "%.1f", s_motor_display.command_torque);
-        snprintf(cmd_bus, sizeof(cmd_bus), "%.1f", s_motor_display.command_bus_voltage);
-    } else {
-        strlcpy(cmd_rpm, "--", sizeof(cmd_rpm));
-        strlcpy(cmd_torque, "--", sizeof(cmd_torque));
-        strlcpy(cmd_bus, "--", sizeof(cmd_bus));
-    }
-    if (data->status1_valid) {
-        snprintf(actual_rpm, sizeof(actual_rpm), "%.1f", s_motor_display.actual_rpm);
-        snprintf(actual_torque, sizeof(actual_torque), "%.1f", s_motor_display.actual_torque);
-    } else {
-        strlcpy(actual_rpm, "--", sizeof(actual_rpm));
-        strlcpy(actual_torque, "--", sizeof(actual_torque));
-    }
-    if (data->status2_valid) {
-        snprintf(controller_temp, sizeof(controller_temp), "%.1f", s_motor_display.controller_temp);
-        snprintf(motor_temp, sizeof(motor_temp), "%.1f", s_motor_display.motor_temp);
-        snprintf(dc_bus, sizeof(dc_bus), "%.1f", s_motor_display.dc_bus_voltage);
-        snprintf(dc_current, sizeof(dc_current), "%.1f", s_motor_display.dc_bus_current);
-        snprintf(ac_current, sizeof(ac_current), "%.1f", s_motor_display.ac_rms_current);
-    } else {
-        strlcpy(controller_temp, "--", sizeof(controller_temp));
-        strlcpy(motor_temp, "--", sizeof(motor_temp));
-        strlcpy(dc_bus, "--", sizeof(dc_bus));
-        strlcpy(dc_current, "--", sizeof(dc_current));
-        strlcpy(ac_current, "--", sizeof(ac_current));
-    }
+    char speed[20], power[20], throttle[20], brake[20];
+    char controller_temp[20], motor_temp[20], dc_bus[20], dc_current[20], steering[20];
+    dbc_value_or_dash(speed, sizeof(speed), motor_speed_valid, "%.0f",
+                      data->motor.motor_speed_rpm);
+    dbc_value_or_dash(power, sizeof(power), motor_fresh, "%.1f", data->motor.motor_power_kw);
+    dbc_value_or_dash(throttle, sizeof(throttle), pedals_fresh, "%.1f", data->pedals.throttle_percent);
+    dbc_value_or_dash(brake, sizeof(brake), pedals_fresh, "%.1f", data->pedals.brake_percent);
+    dbc_value_or_dash(controller_temp, sizeof(controller_temp), motor_fresh, "%.1f",
+                      data->motor.controller_temperature_c);
+    dbc_value_or_dash(motor_temp, sizeof(motor_temp), motor_fresh, "%.1f",
+                      data->motor.motor_temperature_c);
+    dbc_value_or_dash(dc_bus, sizeof(dc_bus), electrical_values_valid, "%.1f",
+                      data->electrical.drive_bus_voltage_v);
+    dbc_value_or_dash(dc_current, sizeof(dc_current), electrical_values_valid, "%.1f",
+                      data->electrical.drive_bus_current_a);
+    const bool steering_valid = angles_fresh &&
+                               data->angles_and_sources.steering_actual_angle_deg > -3276.8f;
+    dbc_value_or_dash(steering, sizeof(steering), steering_valid, "%.1f",
+                      data->angles_and_sources.steering_actual_angle_deg);
 
     if (s_can_widgets.online)
     {
         label_set_if_changed(s_can_widgets.online, online ? "CAN ONLINE" : "CAN OFFLINE");
-        lv_obj_set_style_bg_color(s_can_widgets.online,
-                                  lv_color_hex(online ? 0x39ff65 : 0xff2c2c), LV_PART_MAIN);
+        const lv_color_t wanted = lv_color_hex(online ? 0x39ff65 : 0xff2c2c);
+        if (lv_color_to32(lv_obj_get_style_bg_color(s_can_widgets.online, LV_PART_MAIN)) !=
+            lv_color_to32(wanted))
+        {
+            lv_obj_set_style_bg_color(s_can_widgets.online, wanted, LV_PART_MAIN);
+        }
     }
 
-    dashboard_set_text(s_can_widgets.command_rpm, cmd_rpm, 0xffffff);
-    dashboard_set_text(s_can_widgets.actual_rpm, actual_rpm, 0x39ff65);
-    dashboard_set_text(s_can_widgets.command_torque, cmd_torque, 0xffffff);
-    dashboard_set_text(s_can_widgets.actual_torque, actual_torque, 0x39ff65);
+    dashboard_set_text(s_can_widgets.command_rpm, speed, 0xffffff);
+    dashboard_set_text(s_can_widgets.actual_rpm, power, 0xf7ff00);
+    dashboard_set_text(s_can_widgets.command_torque, throttle, 0x39ff65);
+    dashboard_set_text(s_can_widgets.actual_torque, brake, 0xff5050);
     dashboard_set_text(s_can_widgets.controller_temp, controller_temp, 0xffffff);
     dashboard_set_text(s_can_widgets.motor_temp, motor_temp, 0xffffff);
     dashboard_set_text(s_can_widgets.dc_bus_voltage, dc_bus, 0xffffff);
     dashboard_set_text(s_can_widgets.dc_bus_current, dc_current, 0xffffff);
-    dashboard_set_text(s_can_widgets.ac_rms_current, ac_current, 0xffffff);
-
-    char power[20];
-    if (data->status2_valid)
-        snprintf(power, sizeof(power), "%.1f",
-                 s_motor_display.dc_bus_voltage * s_motor_display.dc_bus_current / 1000.0f);
-    else
-        strlcpy(power, "--", sizeof(power));
-    dashboard_set_text(s_can_widgets.dc_power, power, 0xf7ff00);
+    dashboard_set_text(s_can_widgets.ac_rms_current, lv_batt, 0xffffff);
+    dashboard_set_text(s_can_widgets.dc_power, steering, 0xffffff);
 
     char detail[192];
-    if (data->command_valid)
-    {
-        snprintf(detail, sizeof(detail), "MODE  %s\nGEAR  %s\nCONTACTOR  %s\nCMD BUS  %s V",
-                 motor_mode_name(data->command_mode, mode, sizeof(mode)),
-                 motor_gear_name(data->command_gear),
-                 data->command_main_contactor ? "CLOSED" : "OPEN", cmd_bus);
+    if (control_fresh) {
+        snprintf(detail, sizeof(detail), "DRIVE  %s\nSTEER  %s\nBRAKE  %s",
+                 ami_owner_name(data->control_status.drive_control_owner),
+                 ami_owner_name(data->control_status.steering_control_owner),
+                 ami_owner_name(data->control_status.brake_control_owner));
         dashboard_set_text(s_can_widgets.command_state, detail, 0xffffff);
-    }
-    else
-        dashboard_set_text(s_can_widgets.command_state, "NO COMMAND FRAME", 0x68717d);
-
-    if (data->status1_valid)
-    {
-        snprintf(detail, sizeof(detail), "MODE  %s\nSYSTEM  %s\nALARM LEVEL  %s",
-                 motor_mode_name(data->actual_mode, actual_mode, sizeof(actual_mode)),
-                 (data->actual_mode & 0x80) ? "FAULT" : "NORMAL",
-                 alarm_name[data->combined_alarm & 0x03]);
-        dashboard_set_text(s_can_widgets.mcu_state, detail,
-                           data->combined_alarm ? 0xffd400 : 0x39ff65);
-
-        bool ready = (data->status_flags & 0x01) != 0;
-        bool precharge = (data->status_flags & 0x02) != 0;
-        bool selftest = (data->alarm_flags & 0x80) != 0;
-        snprintf(detail, sizeof(detail), "READY  %s\nPRECHARGE  %s\nSELF TEST  %s",
-                 ready ? "YES" : "NO", precharge ? "DONE" : "NO",
-                 selftest ? "DONE" : "NO");
+        snprintf(detail, sizeof(detail), "ACTUAL  %s\nCOMMAND  %s\nRC LINK  %s",
+                 ami_gear_name(data->control_status.actual_gear),
+                 ami_gear_name(data->control_status.commanded_gear),
+                 data->control_status.rc_link_connected ? "CONNECTED" : "OFFLINE");
+        dashboard_set_text(s_can_widgets.mcu_state, detail, 0xffffff);
+        snprintf(detail, sizeof(detail), "SDC  %s\nBMS DISCHARGE  %s",
+                 data->control_status.sdc_closed ? "CLOSED" : "OPEN",
+                 data->control_status.bms_discharge_available == 1 ? "AVAILABLE" :
+                 data->control_status.bms_discharge_available == 2 ? "UNAVAILABLE" : "UNKNOWN");
         dashboard_set_text(s_can_widgets.readiness, detail,
-                           (ready && precharge && selftest) ? 0x39ff65 : 0xffd400);
-
-        bool controller_fault = (data->status_flags & 0x3c) != 0;
-        snprintf(detail, sizeof(detail),
-                 "RESOLVER  %s    OVER CURRENT  %s\n"
-                 "OVER VOLT  %s    CTRL FAULT  %s\n"
-                 "UNDER VOLT %s    POWER LIMIT %s",
-                 (data->status_flags & 0x04) ? "FAULT" : "OK",
-                 (data->status_flags & 0x08) ? "FAULT" : "OK",
-                 (data->status_flags & 0x10) ? "FAULT" : "OK",
-                 (data->status_flags & 0x20) ? "FAULT" : "OK",
-                 (data->status_flags & 0x40) ? "FAULT" : "OK",
-                 (data->status_flags & 0x80) ? "ACTIVE" : "OFF");
-        dashboard_set_text(s_can_widgets.faults, detail,
-                           controller_fault || (data->status_flags & 0xc0) ? 0xff2c2c : 0x39ff65);
-
-        bool temp_alarm = (data->alarm_flags & 0x03) != 0;
-        snprintf(detail, sizeof(detail),
-                 "CONTROLLER TEMP  %s\nMOTOR TEMP       %s\nCOMBINED         %s",
-                 (data->alarm_flags & 0x01) ? "ALARM" : "OK",
-                 (data->alarm_flags & 0x02) ? "ALARM" : "OK",
-                 alarm_name[data->combined_alarm & 0x03]);
-        uint32_t alarm_color = (data->combined_alarm >= 2 || temp_alarm) ? 0xff2c2c
-                                 : (data->combined_alarm == 1 ? 0xffd400 : 0x39ff65);
-        dashboard_set_text(s_can_widgets.alarms, detail, alarm_color);
-    }
-    else
-    {
-        dashboard_set_text(s_can_widgets.mcu_state, "NO STATUS 1 FRAME", 0x68717d);
+                           data->control_status.sdc_closed ? 0x39ff65 : 0xffd400);
+    } else {
+        dashboard_set_text(s_can_widgets.command_state, "NO CONTROL STATUS", 0x68717d);
+        dashboard_set_text(s_can_widgets.mcu_state, "--", 0x68717d);
         dashboard_set_text(s_can_widgets.readiness, "--", 0x68717d);
-        dashboard_set_text(s_can_widgets.faults, "NO STATUS 1 FRAME", 0x68717d);
-        dashboard_set_text(s_can_widgets.alarms, "NO STATUS 1 FRAME", 0x68717d);
     }
 
-    char buf[32];
-    if (rpm_valid)
-    {
-        snprintf(buf, sizeof(buf), "%.1f", data->status1_valid ? s_motor_display.actual_rpm : s_motor_display.command_rpm);
-        label_set_if_changed(objects.speed_label_3, buf);
+    if (as_fresh) {
+        snprintf(detail, sizeof(detail),
+                 "EBS  %s    RES  %s\nSBW  %s    EHB  %s\n"
+                 "BRK P1 %.2f MPa    P2 %.2f MPa\nAIR P1 %.2f MPa    P2 %.2f MPa",
+                 ami_as_state_name(data->as_status.ebs_state),
+                 ami_as_state_name(data->as_status.res_state),
+                 ami_as_state_name(data->as_status.sbw_state),
+                 ami_as_state_name(data->as_status.ehb_state),
+                 data->as_status.brake_pressure_1_mpa, data->as_status.brake_pressure_2_mpa,
+                 data->as_status.air_pressure_1_mpa, data->as_status.air_pressure_2_mpa);
+        dashboard_set_text(s_can_widgets.faults, detail,
+                           (data->as_status.ebs_state == 2 || data->as_status.sbw_state == 2 ||
+                            data->as_status.ehb_state == 2) ? 0xff2c2c : 0x39ff65);
+    } else {
+        dashboard_set_text(s_can_widgets.faults, "NO AS STATUS", 0x68717d);
     }
-    else
-        label_set_if_changed(objects.speed_label_3, "--");
 
-    if (data->status2_valid)
-    {
-        snprintf(buf, sizeof(buf), "%.1f", s_motor_display.motor_temp);
-        label_set_if_changed(objects.motor_tem, buf);
-        snprintf(buf, sizeof(buf), "%.1f", s_motor_display.controller_temp);
-        label_set_if_changed(objects.rotating_speed, buf);
-        snprintf(buf, sizeof(buf), "%.1f", s_motor_display.dc_bus_voltage);
-        label_set_if_changed(objects.ts_volt, buf);
-        snprintf(buf, sizeof(buf), "%.1f", s_motor_display.dc_bus_current);
-        label_set_if_changed(objects.ts_a, buf);
-        snprintf(buf, sizeof(buf), "%.1f", s_motor_display.dc_bus_voltage * s_motor_display.dc_bus_current / 1000.0f);
-        label_set_if_changed(objects.__, buf);
+    if (angles_fresh) {
+        snprintf(detail, sizeof(detail), "ECTL SPEED  %s    ECTL ELEC  %s\n"
+                 "BMS INFO    %s    BMS POWER %s\n"
+                 "SBW SOURCE  %s    VCU 0x503 %s",
+                 ami_source_name(data->angles_and_sources.source_state[3]),
+                 ami_source_name(data->angles_and_sources.source_state[4]),
+                 ami_source_name(data->angles_and_sources.source_state[5]),
+                 ami_source_name(data->angles_and_sources.source_state[6]),
+                 ami_source_name(data->angles_and_sources.source_state[1]),
+                 ami_source_name(data->angles_and_sources.source_state[14]));
+        dashboard_set_text(s_can_widgets.alarms, detail,
+                           (data->angles_and_sources.source_state[3] == 1 &&
+                            data->angles_and_sources.source_state[4] == 1) ?
+                           0x39ff65 : 0xffd400);
+    } else {
+        dashboard_set_text(s_can_widgets.alarms, "NO SOURCE STATUS", 0x68717d);
     }
-    else
-    {
-        label_set_if_changed(objects.motor_tem, "--");
-        label_set_if_changed(objects.rotating_speed, "--");
-        label_set_if_changed(objects.ts_volt, "--");
-        label_set_if_changed(objects.ts_a, "--");
-        label_set_if_changed(objects.__, "--");
+
+    label_set_if_changed(objects.speed_label_3, speed);
+    label_set_if_changed(objects.motor_tem, motor_temp);
+    label_set_if_changed(objects.rotating_speed, controller_temp);
+    label_set_if_changed(objects.ts_volt, dc_bus);
+    label_set_if_changed(objects.ts_a, dc_current);
+    label_set_if_changed(objects.__, power);
+}
+
+static void driving_dashboard_update(const ami_display_can_snapshot_t *data)
+{
+    if (!data || !objects.driver_view) {
+        return;
     }
+    const bool motor_fresh = ami_display_can_frame_is_fresh(&data->motor.meta,
+                                                              AMI_DBC_FRAME_TIMEOUT_MS);
+    const bool pedals_fresh = ami_display_can_frame_is_fresh(&data->pedals.meta,
+                                                               AMI_DBC_FRAME_TIMEOUT_MS);
+    const bool angles_fresh = ami_display_can_frame_is_fresh(&data->angles_and_sources.meta,
+                                                               AMI_DBC_FRAME_TIMEOUT_MS);
+    const bool motor_speed_valid = motor_fresh &&
+        (!angles_fresh || data->angles_and_sources.source_state[3] == 1);
+    char text[20];
+    dbc_value_or_dash(text, sizeof(text), motor_speed_valid, "%.0f",
+                      data->motor.motor_speed_rpm);
+    label_set_if_changed(objects.speed_label_2, text);
+    dbc_value_or_dash(text, sizeof(text), motor_fresh, "%.1f", data->motor.motor_temperature_c);
+    label_set_if_changed(objects.tempmotor_label, text);
+    dbc_value_or_dash(text, sizeof(text), motor_fresh, "%.1f", data->motor.controller_temperature_c);
+    label_set_if_changed(objects.temp_inv_label, text);
+    if (pedals_fresh) {
+        lv_bar_set_value(objects.brake_presure_bar, (int32_t)data->pedals.brake_percent,
+                         LV_ANIM_OFF);
+        lv_bar_set_value(objects.accellerator_presure_bar,
+                         (int32_t)data->pedals.throttle_percent, LV_ANIM_OFF);
+    }
+}
+
+/* INSPECT left-side READY CONDITIONS.  These six rows were generated with
+ * green demonstration defaults; drive both their dot and value from the DBC
+ * so an absent/stale bus is visibly unsafe instead of deceptively ready. */
+static void inspect_condition_set(lv_obj_t *dot, lv_obj_t *value, bool normal,
+                                  const char *text)
+{
+    const lv_color_t color = lv_color_hex(normal ? 0x39ff65 : 0xff3030);
+    if (dot && lv_color_to32(lv_obj_get_style_bg_color(dot, LV_PART_MAIN)) !=
+                   lv_color_to32(color)) {
+        lv_obj_set_style_bg_color(dot, color, LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_border_color(dot, color, LV_PART_MAIN | LV_STATE_DEFAULT);
+    }
+    if (value) {
+        label_set_if_changed(value, text);
+        if (lv_color_to32(lv_obj_get_style_text_color(value, LV_PART_MAIN)) !=
+            lv_color_to32(color)) {
+            lv_obj_set_style_text_color(value, color, LV_PART_MAIN | LV_STATE_DEFAULT);
+        }
+    }
+}
+
+static void inspect_conditions_update(const ami_display_can_snapshot_t *data)
+{
+    if (!data || !objects.inspect) {
+        return;
+    }
+
+    const bool control_fresh = ami_display_can_frame_is_fresh(&data->control_status.meta,
+                                                                AMI_DBC_FRAME_TIMEOUT_MS);
+    const bool as_fresh = ami_display_can_frame_is_fresh(&data->as_status.meta,
+                                                           AMI_DBC_FRAME_TIMEOUT_MS);
+
+    const bool asms_ok = control_fresh &&
+                         data->control_status.bms_discharge_available == 1;
+    const bool tsms_ok = control_fresh && data->control_status.sdc_closed;
+    const bool res_ok = as_fresh && (data->as_status.res_state == 1 ||
+                                     data->as_status.res_state == 3);
+    const bool ebs_ok = as_fresh && data->as_status.ebs_state == 1;
+    const bool steering_ok = as_fresh && data->as_status.sbw_state == 1;
+    const bool brake_ok = as_fresh && data->as_status.ehb_state == 1;
+
+    inspect_condition_set(objects.obj21, objects.obj23, asms_ok,
+                          !control_fresh ? "NO CAN" :
+                          asms_ok ? "AVAILABLE" : "UNAVAILABLE");
+    inspect_condition_set(objects.obj24, objects.obj26, tsms_ok,
+                          !control_fresh ? "NO CAN" : tsms_ok ? "CLOSED" : "OPEN");
+    inspect_condition_set(objects.obj27, objects.obj29, res_ok,
+                          !as_fresh ? "NO CAN" : data->as_status.res_state == 3 ? "GO" :
+                          res_ok ? "NORMAL" : "FAULT");
+    inspect_condition_set(objects.obj30, objects.obj32, ebs_ok,
+                          !as_fresh ? "NO CAN" : ebs_ok ? "ENABLED" : "FAULT");
+    inspect_condition_set(objects.obj33, objects.obj35, steering_ok,
+                          !as_fresh ? "NO CAN" : steering_ok ? "READY" : "FAULT");
+    inspect_condition_set(objects.obj36, objects.obj38, brake_ok,
+                          !as_fresh ? "NO CAN" : brake_ok ? "ENABLED" : "FAULT");
 }
 
 #define ASSI_OFF_COLOR 0x68717d
@@ -972,29 +884,158 @@ static lv_obj_t *ami_selection_led(uint8_t index)
     return index < AMI_SELECTION_COUNT ? leds[index] : NULL;
 }
 
+/* AMI selected-task overlay: kept outside the generated UI so future EEZ
+ * exports do not overwrite the interactive task-selection presentation. */
+static lv_obj_t *s_ami_selection_card;
 static lv_obj_t *s_ami_selection_label;
+static lv_obj_t *s_ami_selection_caption;
+static lv_obj_t *s_ami_selection_hint;
+static lv_obj_t *s_ami_selection_accent;
+#if ROTARY_INPUT_ENABLE
+static lv_obj_t *s_ami_rotary_debug_label;
+#endif
 
 static void inspect_show_stage(uint8_t stage);
 
+/* Generated EEZ pages have fixed 1920x1080 geometry.  Dynamic labels need
+ * explicit overflow behaviour so an unexpected CAN/status string never
+ * shifts, overlaps, or escapes its panel. */
+static void label_layout_guard(lv_obj_t *label, lv_label_long_mode_t mode,
+                               lv_text_align_t align)
+{
+    if (!label) {
+        return;
+    }
+    lv_label_set_long_mode(label, mode);
+    lv_obj_set_style_text_align(label, align, LV_PART_MAIN | LV_STATE_DEFAULT);
+}
+
+static void ui_apply_text_layout_guards(void)
+{
+    /* AUTONOMOUS: numeric fields are always one line; clipping prevents an
+     * unexpected string from colliding with surrounding instruments. */
+    label_layout_guard(objects.obj2, LV_LABEL_LONG_CLIP, LV_TEXT_ALIGN_CENTER);
+    label_layout_guard(objects.speed_label_3, LV_LABEL_LONG_CLIP, LV_TEXT_ALIGN_CENTER);
+    label_layout_guard(objects.motor_tem, LV_LABEL_LONG_CLIP, LV_TEXT_ALIGN_CENTER);
+    label_layout_guard(objects.rotating_speed, LV_LABEL_LONG_CLIP, LV_TEXT_ALIGN_CENTER);
+    label_layout_guard(objects.ts_volt, LV_LABEL_LONG_CLIP, LV_TEXT_ALIGN_CENTER);
+    label_layout_guard(objects.ts_a, LV_LABEL_LONG_CLIP, LV_TEXT_ALIGN_CENTER);
+    label_layout_guard(objects.__, LV_LABEL_LONG_CLIP, LV_TEXT_ALIGN_CENTER);
+
+    /* DRIVER_VIEW: protect the live CAN numerics and generated text fields. */
+    label_layout_guard(objects.speed_label, LV_LABEL_LONG_CLIP, LV_TEXT_ALIGN_CENTER);
+    label_layout_guard(objects.speed_label_2, LV_LABEL_LONG_CLIP, LV_TEXT_ALIGN_CENTER);
+    label_layout_guard(objects.tempmotor_label, LV_LABEL_LONG_CLIP, LV_TEXT_ALIGN_CENTER);
+    label_layout_guard(objects.temp_inv_label, LV_LABEL_LONG_CLIP, LV_TEXT_ALIGN_CENTER);
+    label_layout_guard(objects.ready_label, LV_LABEL_LONG_CLIP, LV_TEXT_ALIGN_CENTER);
+
+    /* INSPECTION has deliberately wide panels for multi-line status text. */
+    label_layout_guard(objects.inspect_as_state, LV_LABEL_LONG_CLIP, LV_TEXT_ALIGN_CENTER);
+    label_layout_guard(objects.inspect_test_timer, LV_LABEL_LONG_CLIP, LV_TEXT_ALIGN_CENTER);
+    label_layout_guard(objects.inspect_main_action, LV_LABEL_LONG_CLIP, LV_TEXT_ALIGN_CENTER);
+    label_layout_guard(objects.inspect_main_detail, LV_LABEL_LONG_CLIP, LV_TEXT_ALIGN_CENTER);
+    label_layout_guard(objects.inspect_main_note, LV_LABEL_LONG_CLIP, LV_TEXT_ALIGN_CENTER);
+    label_layout_guard(objects.inspect_ebs_value, LV_LABEL_LONG_CLIP, LV_TEXT_ALIGN_CENTER);
+    label_layout_guard(objects.inspect_ts_value, LV_LABEL_LONG_CLIP, LV_TEXT_ALIGN_CENTER);
+    label_layout_guard(objects.inspect_brake_value, LV_LABEL_LONG_CLIP, LV_TEXT_ALIGN_CENTER);
+    label_layout_guard(objects.inspect_steering_value, LV_LABEL_LONG_CLIP, LV_TEXT_ALIGN_CENTER);
+    label_layout_guard(objects.inspect_last_command, LV_LABEL_LONG_CLIP, LV_TEXT_ALIGN_LEFT);
+    label_layout_guard(objects.inspect_trigger_source, LV_LABEL_LONG_CLIP, LV_TEXT_ALIGN_LEFT);
+    label_layout_guard(objects.inspect_reset_required, LV_LABEL_LONG_CLIP, LV_TEXT_ALIGN_LEFT);
+    label_layout_guard(objects.inspect_reset_instruction, LV_LABEL_LONG_CLIP, LV_TEXT_ALIGN_LEFT);
+    label_layout_guard(objects.inspect_footer_status, LV_LABEL_LONG_CLIP, LV_TEXT_ALIGN_LEFT);
+    label_layout_guard(objects.inspect_data_age, LV_LABEL_LONG_CLIP, LV_TEXT_ALIGN_RIGHT);
+}
+
 static void ami_show_selection(uint8_t selected)
 {
-    static const char *const names[AMI_SELECTION_COUNT] = {
-        "DRIVING", "LINE ACC", "EIGHT", "HIGH FOLLOW", "EBS", "INSPECT"};
-
     if (!objects.ami)
         return;
 
-    if (!s_ami_selection_label)
+    if (!s_ami_selection_card)
     {
-        s_ami_selection_label = lv_label_create(objects.ami);
-        lv_obj_set_pos(s_ami_selection_label, 780, 500);
-        lv_obj_set_size(s_ami_selection_label, 360, 70);
-        lv_obj_set_style_text_align(s_ami_selection_label, LV_TEXT_ALIGN_CENTER,
+        /* Top-right task card: it is clear of the six circular task LEDs and
+         * replaces the old label that sat over the centre of the dashboard. */
+        s_ami_selection_card = lv_obj_create(objects.ami);
+        /* Wide, shallow card keeps every task name on one instrument-style
+         * line.  It occupies unused top-right space, clear of all task LEDs. */
+        lv_obj_set_pos(s_ami_selection_card, 1240, 42);
+        lv_obj_set_size(s_ami_selection_card, 620, 160);
+        lv_obj_clear_flag(s_ami_selection_card, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_radius(s_ami_selection_card, 16,
+                                LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_bg_color(s_ami_selection_card, lv_color_hex(0x07131f),
+                                  LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_bg_opa(s_ami_selection_card, 220,
+                                LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_border_color(s_ami_selection_card, lv_color_hex(0x2ed8ff),
+                                      LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_border_opa(s_ami_selection_card, 210,
                                     LV_PART_MAIN | LV_STATE_DEFAULT);
-        lv_obj_set_style_text_color(s_ami_selection_label, lv_color_hex(0xffffff),
+        lv_obj_set_style_border_width(s_ami_selection_card, 2,
+                                      LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_pad_all(s_ami_selection_card, 0,
+                                 LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_shadow_color(s_ami_selection_card, lv_color_hex(0x000000),
+                                      LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_shadow_opa(s_ami_selection_card, 120,
                                     LV_PART_MAIN | LV_STATE_DEFAULT);
-        lv_obj_set_style_text_font(s_ami_selection_label, &ui_font_orbitron_bold_30,
+        lv_obj_set_style_shadow_width(s_ami_selection_card, 12,
+                                      LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_shadow_ofs_y(s_ami_selection_card, 5,
+                                      LV_PART_MAIN | LV_STATE_DEFAULT);
+
+        s_ami_selection_accent = lv_obj_create(s_ami_selection_card);
+        lv_obj_set_pos(s_ami_selection_accent, 0, 18);
+        lv_obj_set_size(s_ami_selection_accent, 6, 124);
+        lv_obj_clear_flag(s_ami_selection_accent, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_radius(s_ami_selection_accent, 3,
+                                LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_bg_color(s_ami_selection_accent, lv_color_hex(0xff3030),
+                                  LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_bg_opa(s_ami_selection_accent, LV_OPA_COVER,
+                                LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_border_width(s_ami_selection_accent, 0,
+                                      LV_PART_MAIN | LV_STATE_DEFAULT);
+
+        s_ami_selection_caption = lv_label_create(s_ami_selection_card);
+        lv_obj_set_pos(s_ami_selection_caption, 26, 13);
+        lv_obj_set_size(s_ami_selection_caption, 568, 24);
+        lv_obj_set_style_text_align(s_ami_selection_caption, LV_TEXT_ALIGN_RIGHT,
+                                    LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_text_color(s_ami_selection_caption, lv_color_hex(0x82bfd0),
+                                    LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_text_font(s_ami_selection_caption, &ui_font_orbitron_bold_20,
                                    LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_text_letter_space(s_ami_selection_caption, 2,
+                                           LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_label_set_text_static(s_ami_selection_caption, "SELECTED TASK");
+
+        s_ami_selection_label = lv_label_create(s_ami_selection_card);
+        lv_obj_set_pos(s_ami_selection_label, 24, 38);
+        lv_obj_set_size(s_ami_selection_label, 572, 52);
+        lv_obj_set_style_text_align(s_ami_selection_label, LV_TEXT_ALIGN_RIGHT,
+                                    LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_text_color(s_ami_selection_label, lv_color_hex(0xf3fbff),
+                                    LV_PART_MAIN | LV_STATE_DEFAULT);
+        /* Orbitron 40 retains the dashboard style while fitting the longest
+         * name (MANUAL DRIVING) with generous side margins. */
+        lv_obj_set_style_text_font(s_ami_selection_label, &ui_font_orbitron_bold_40,
+                                   LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_text_letter_space(s_ami_selection_label, 0,
+                                           LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_label_set_long_mode(s_ami_selection_label, LV_LABEL_LONG_CLIP);
+
+        s_ami_selection_hint = lv_label_create(s_ami_selection_card);
+        lv_obj_set_pos(s_ami_selection_hint, 26, 122);
+        lv_obj_set_size(s_ami_selection_hint, 568, 24);
+        lv_obj_set_style_text_align(s_ami_selection_hint, LV_TEXT_ALIGN_RIGHT,
+                                    LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_text_color(s_ami_selection_hint, lv_color_hex(0x6e98a8),
+                                    LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_text_font(s_ami_selection_hint, &ui_font_orbitron_bold_20,
+                                   LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_label_set_text_static(s_ami_selection_hint, "SHORT: NEXT   HOLD: ENTER");
     }
 
     for (uint8_t i = 0; i < AMI_SELECTION_COUNT; ++i)
@@ -1011,35 +1052,164 @@ static void ami_show_selection(uint8_t selected)
 
     if (selected < AMI_SELECTION_COUNT)
     {
-        lv_label_set_text(s_ami_selection_label, names[selected]);
-        lv_obj_clear_flag(s_ami_selection_label, LV_OBJ_FLAG_HIDDEN);
+        lv_label_set_text(s_ami_selection_label, s_ami_task_names[selected]);
+        lv_obj_clear_flag(s_ami_selection_card, LV_OBJ_FLAG_HIDDEN);
     }
     else
     {
-        /* 未选择时不显示任何提示文字，避免遮挡主界面。 */
-        lv_label_set_text(s_ami_selection_label, "");
-        lv_obj_add_flag(s_ami_selection_label, LV_OBJ_FLAG_HIDDEN);
+        /* 未选择时不显示任务卡，避免遮挡主界面。 */
+        lv_obj_add_flag(s_ami_selection_card, LV_OBJ_FLAG_HIDDEN);
     }
 
-    lv_obj_invalidate(objects.ami);
+    /* Each changed LED/label invalidates itself.  Invalidating the parent
+     * would turn a single GPIO5 selection step into a full-screen redraw. */
 }
 
-/* The EEZ project presently contains one driving page, one shared autonomous
- * dashboard and one inspection page.  The four autonomous tasks therefore
- * enter the shared dashboard; INSPECT enters its dedicated page. */
+static void ami_show_rotary_debug(void)
+{
+#if ROTARY_INPUT_ENABLE
+    if (!objects.ami) {
+        return;
+    }
+    if (!s_ami_rotary_debug_label) {
+        s_ami_rotary_debug_label = lv_label_create(objects.ami);
+        lv_obj_set_pos(s_ami_rotary_debug_label, 710, 585);
+        lv_obj_set_size(s_ami_rotary_debug_label, 500, 34);
+        lv_obj_set_style_text_align(s_ami_rotary_debug_label, LV_TEXT_ALIGN_CENTER,
+                                    LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_text_color(s_ami_rotary_debug_label, lv_color_hex(0x9aa7b4),
+                                    LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_text_font(s_ami_rotary_debug_label, &ui_font_orbitron_bold_20,
+                                   LV_PART_MAIN | LV_STATE_DEFAULT);
+    }
+
+    rotary_input_debug_t debug = {0};
+    rotary_input_get_debug(&debug);
+    char text[96];
+    snprintf(text, sizeof(text), "EC11 A4:%u B3:%u C2:%u  ROT:%lu  KEY:%lu",
+             debug.a_level, debug.b_level, debug.c_level,
+             (unsigned long)debug.rotation_events,
+             (unsigned long)debug.press_events);
+    lv_label_set_text(s_ami_rotary_debug_label, text);
+#endif
+}
+
+/* INSPECTION has its own procedure page.  Every other AMI task enters the
+ * Autonomous dashboard and shows the selected task's standard English name. */
 static void ami_open_selection(uint8_t selected, uint8_t *inspect_stage,
                                bool *inspect_led_on, TickType_t *inspect_blink_tick)
 {
-    if (selected == 0) {
-        loadScreen(SCREEN_ID_DRIVER_VIEW);
-    } else if (selected == AMI_SELECTION_COUNT - 1) {
+    if (selected == AMI_SELECTION_COUNT - 1) {
         *inspect_stage = 0;
         *inspect_led_on = false;
         *inspect_blink_tick = xTaskGetTickCount();
         inspect_show_stage(*inspect_stage);
         loadScreen(SCREEN_ID_INSPECT);
     } else {
+        driving_demo_start();
+        if (objects.obj2) {
+            lv_label_set_text(objects.obj2, s_autonomous_task_labels[selected]);
+        }
         loadScreen(SCREEN_ID_AUTONOMOUS);
+    }
+}
+
+typedef struct
+{
+    uint8_t raw_level;
+    uint8_t stable_level;
+    TickType_t raw_change_tick;
+    TickType_t press_start_tick;
+    bool press_started_on_ami;
+    bool long_press_handled;
+} ami_button_state_t;
+
+static bool ami_button_is_pressed(uint8_t level)
+{
+    return level == AMI_BUTTON_ACTIVE_LEVEL;
+}
+
+static void ami_button_state_init(ami_button_state_t *button, lv_obj_t *active_scr)
+{
+    const TickType_t now = xTaskGetTickCount();
+    const uint8_t level = gpio_get_level(AMI_BUTTON_GPIO) ? 1 : 0;
+
+    *button = (ami_button_state_t) {
+        .raw_level = level,
+        .stable_level = level,
+        .raw_change_tick = now,
+        .press_start_tick = now,
+        .press_started_on_ami = ami_button_is_pressed(level) && active_scr == objects.ami,
+        .long_press_handled = false,
+    };
+}
+
+/* GPIO5 is sampled by the existing 20 ms UI task.  A long press is executed
+ * once while held; its later release cannot also become a short press.
+ * On AMI it opens the selected task; on every task page it returns to AMI. */
+static void ami_button_process(ami_button_state_t *button, lv_obj_t *active_scr,
+                               uint8_t *ami_selection, uint8_t *inspect_stage,
+                               bool *inspect_led_on, TickType_t *inspect_blink_tick)
+{
+    const TickType_t now = xTaskGetTickCount();
+    const uint8_t raw_level = gpio_get_level(AMI_BUTTON_GPIO) ? 1 : 0;
+
+    if (raw_level != button->raw_level)
+    {
+        button->raw_level = raw_level;
+        button->raw_change_tick = now;
+    }
+
+    if (button->stable_level != button->raw_level &&
+        now - button->raw_change_tick >= pdMS_TO_TICKS(AMI_BUTTON_DEBOUNCE_MS))
+    {
+        button->stable_level = button->raw_level;
+
+        if (ami_button_is_pressed(button->stable_level))
+        {
+            button->press_start_tick = now;
+            button->press_started_on_ami = active_scr == objects.ami;
+            button->long_press_handled = false;
+        }
+        else
+        {
+            /* Releasing a non-long press on AMI advances clockwise once. */
+            if (button->press_started_on_ami && !button->long_press_handled &&
+                active_scr == objects.ami && lvgl_port_lock(portMAX_DELAY))
+            {
+                *ami_selection = (uint8_t)((*ami_selection + 1U) % AMI_SELECTION_COUNT);
+                ami_show_selection(*ami_selection);
+                lvgl_port_unlock();
+                ESP_LOGI(TAG, "GPIO5 short press: AMI selection=%u", *ami_selection);
+            }
+            button->press_started_on_ami = false;
+            button->long_press_handled = false;
+        }
+    }
+
+    if (ami_button_is_pressed(button->stable_level) &&
+        !button->long_press_handled &&
+        now - button->press_start_tick >= pdMS_TO_TICKS(AMI_BUTTON_LONG_PRESS_MS))
+    {
+        if (lvgl_port_lock(portMAX_DELAY))
+        {
+            if (button->press_started_on_ami && active_scr == objects.ami)
+            {
+                ami_open_selection(*ami_selection, inspect_stage,
+                                   inspect_led_on, inspect_blink_tick);
+                ESP_LOGI(TAG, "GPIO5 long press: open AMI selection=%u", *ami_selection);
+            }
+            else if (!button->press_started_on_ami && active_scr != objects.ami)
+            {
+                /* Keep the task highlight the user came from, without
+                 * allowing the later release to advance the selection. */
+                ami_show_selection(*ami_selection);
+                loadScreen(SCREEN_ID_AMI);
+                ESP_LOGI(TAG, "GPIO5 long press: return to AMI menu");
+            }
+            lvgl_port_unlock();
+        }
+        button->long_press_handled = true;
     }
 }
 
@@ -1113,45 +1283,84 @@ static void inspect_show_stage(uint8_t stage)
 static void ui_update_task(void *arg)
 {
     uint8_t boot_last = 1;
+#if BOARD_HAS_XL9555
     uint8_t extio9_last = 1;
     uint8_t extio10_last = 1;
+#endif
     uint8_t ami_selection = 0; /* 默认选择有人驾驶/DRIVING */
     uint8_t inspect_stage = 0;
     TickType_t inspect_blink_tick = xTaskGetTickCount();
     bool inspect_led_on = true;
     bool last_can_online = true; /* 强制首次循环将界面更新为CAN OFF */
+    TickType_t rotary_debug_tick = 0;
+    TickType_t dashboard_update_tick = 0;
+    lv_obj_t *last_dashboard_screen = NULL;
+    ami_button_state_t ami_button;
 
     ESP_LOGI(TAG, "UI update task started");
-    ami_show_selection(ami_selection);
+    if (lvgl_port_lock(portMAX_DELAY))
+    {
+        ui_apply_text_layout_guards();
+        ami_show_selection(ami_selection);
+        lvgl_port_unlock();
+    }
+    ami_button_state_init(&ami_button, lv_scr_act());
 
     while (1)
     {
-        motor_can_data_t can_data = {0};
-
-        /* 在同一临界区复制协议数据快照。 */
-        if (g_rpm_mutex)
-        {
-            xSemaphoreTake(g_rpm_mutex, portMAX_DELAY);
-            can_data = g_motor_can_data;
-            xSemaphoreGive(g_rpm_mutex);
-        }
-
-        /* 无论当前显示哪个页面，都持续更新仪表/灯条共用的平滑转速。 */
-        motor_display_smooth_update(&can_data);
+        ami_display_can_snapshot_t can_data = {0};
+        ami_display_can_get_snapshot(&can_data);
 
         /* === 检测当前显示的屏幕 === */
         lv_obj_t *active_scr = lv_scr_act();
 
-        /* 启动时默认CAN OFF；收到帧后亮绿，超过1秒无新帧则离线。 */
-        TickType_t can_now = xTaskGetTickCount();
-        bool can_online = g_can_rx_seen &&
-                          (can_now - g_last_can_rx_tick <= pdMS_TO_TICKS(1000));
+        /* Update immediately after a page switch, then at a bounded visual
+         * rate.  CAN reception and its smoothing calculation remain 20 ms. */
+        if (active_scr != last_dashboard_screen)
+        {
+            last_dashboard_screen = active_scr;
+            dashboard_update_tick = 0;
+        }
+        const TickType_t dashboard_now = xTaskGetTickCount();
+        const bool dashboard_due = dashboard_update_tick == 0 ||
+                                   dashboard_now - dashboard_update_tick >=
+                                       pdMS_TO_TICKS(UI_DASHBOARD_UPDATE_MS);
+
+        if (active_scr == objects.ami &&
+            xTaskGetTickCount() - rotary_debug_tick >= pdMS_TO_TICKS(100) &&
+            lvgl_port_lock(portMAX_DELAY))
+        {
+            rotary_debug_tick = xTaskGetTickCount();
+            ami_show_rotary_debug();
+            lvgl_port_unlock();
+        }
+
+        /* DBC sends every recognised AMI frame at 20 Hz.  A 250 ms window
+         * tolerates a few dropped frames without hiding a live dashboard. */
+        bool can_online = ami_display_can_any_frame_is_fresh(&can_data,
+                                                               AMI_DBC_FRAME_TIMEOUT_MS);
 
         /* 两页都接收实时数据：AUTONOMOUS更新原有数值，调试页更新CAN明细。 */
-        if ((active_scr == objects.autonomous || active_scr == s_can_dashboard) &&
+        if (dashboard_due &&
+            (active_scr == objects.autonomous || active_scr == s_can_dashboard) &&
             lvgl_port_lock(portMAX_DELAY))
         {
             autonomous_can_dashboard_update(&can_data, can_online);
+            dashboard_update_tick = xTaskGetTickCount();
+            lvgl_port_unlock();
+        }
+        else if (dashboard_due && active_scr == objects.driver_view &&
+                 lvgl_port_lock(portMAX_DELAY))
+        {
+            driving_dashboard_update(&can_data);
+            dashboard_update_tick = xTaskGetTickCount();
+            lvgl_port_unlock();
+        }
+        else if (dashboard_due && active_scr == objects.inspect &&
+                 lvgl_port_lock(portMAX_DELAY))
+        {
+            inspect_conditions_update(&can_data);
+            dashboard_update_tick = xTaskGetTickCount();
             lvgl_port_unlock();
         }
 
@@ -1191,7 +1400,7 @@ static void ui_update_task(void *arg)
                 ESP_LOGI(TAG, "BOOT pressed (GPIO35)");
                 if (active_scr == objects.autonomous && s_can_dashboard)
                 {
-                    lv_scr_load_anim(s_can_dashboard, LV_SCR_LOAD_ANIM_FADE_IN, 200, 0, false);
+                    lv_scr_load_anim(s_can_dashboard, LV_SCR_LOAD_ANIM_NONE, 0, 0, false);
                 }
                 else
                 {
@@ -1201,6 +1410,10 @@ static void ui_update_task(void *arg)
             boot_last = curr;
         }
 
+        /* === GPIO5：AMI短按顺时针选择；AMI长按进入，页面长按返回AMI === */
+        ami_button_process(&ami_button, lv_scr_act(), &ami_selection,
+                           &inspect_stage, &inspect_led_on, &inspect_blink_tick);
+
         /* === 旋钮：主界面左/右选择，按下确认 === */
 #if ROTARY_INPUT_ENABLE
         {
@@ -1208,7 +1421,18 @@ static void ui_update_task(void *arg)
             while (rotary_input_get_event(&event, 0))
             {
                 if (active_scr != objects.ami)
+                {
+                    /* The EC11 button is also the back key outside the AMI
+                     * menu.  Rotation is deliberately ignored on pages. */
+                    if (event == ROTARY_EVENT_PRESS)
+                    {
+                        ami_selection = 0;
+                        ami_show_selection(ami_selection);
+                        loadScreen(SCREEN_ID_AMI);
+                        ESP_LOGI(TAG, "Rotary press: return to AMI menu");
+                    }
                     continue;
+                }
 
                 if (event == ROTARY_EVENT_LEFT)
                 {
@@ -1236,6 +1460,7 @@ static void ui_update_task(void *arg)
         }
 #endif
 
+#if BOARD_HAS_XL9555
         /* === EXIO9：确认主页面任务 === */
         {
             uint8_t val = xl9555_extio9_read();
@@ -1292,6 +1517,7 @@ static void ui_update_task(void *arg)
             }
             extio10_last = curr;
         }
+#endif
 
         /* 车检页除AS OFF外：ASSI灯按当前颜色每1秒切换一次亮/灭。 */
         if (active_scr == objects.inspect && inspect_stage > 0)
@@ -1330,19 +1556,9 @@ static void ui_update_task(void *arg)
  */
 void app_main(void)
 {
-    /* Stand-alone 12 V boot must not depend on USB CDC initialisation. */
-    lcd_backlight_boot_enable();
-
-#if GPIO13_HIGH_LEVEL_TEST
-    gpio13_high_level_test();
-    return;
-#endif
-
-#if WS2815_FULL_YELLOW_TEST
-    /* Keep this before every other peripheral initialisation for a focused RMT test. */
-    ws2815_full_yellow_test();
-    return;
-#endif
+    /* Stand-alone 12 V boot must not depend on USB CDC initialisation, but
+     * BL remains off until the first normal UI frame is ready. */
+    lcd_backlight_boot_prepare();
 
 #if LCD_MINIMAL_TEST
     /*
@@ -1365,11 +1581,15 @@ void app_main(void)
     vTaskDelay(pdMS_TO_TICKS(2000));
 #endif
 
-    /* sdkconfig selects USB Serial/JTAG as the ESP console.  Do not install a
-     * second TinyUSB CDC console here: the board's existing /dev/ttyACM0 is
-     * then the single destination for boot and application logs. */
-    ESP_LOGI(TAG, "USB Serial/JTAG console ready (ACM0)");
+    usb_cdc_console_init();
+    /* CDC enumeration continues in the background; do not hold display
+     * startup for a fixed one-second serial-port delay. */
+    ESP_LOGI(TAG, "TinyUSB CDC console ready");
     ESP_LOGW(TAG, "Reset reason: %d", esp_reset_reason());
+    esp_chip_info_t chip_info;
+    esp_chip_info(&chip_info);
+    ESP_LOGI(TAG, "ESP32-P4 silicon revision: %u (DSI build target: v3.x)",
+             chip_info.revision);
 
 #if LCD_MINIMAL_TEST
     /* 留出 CDC 枚举时间，之后只执行 LCD 驱动和纯色刷新。 */
@@ -1380,7 +1600,7 @@ void app_main(void)
 
 #if SCREEN_CAN_TEST_ONLY
     /* Deliberately return after display + CAN-B. No XL9555/I2C, rotary,
-     * touch, WS2815, BOOT key, dashboard or other application task runs. */
+     * touch, BOOT key, dashboard or other application task runs. */
     can_screen_test_start();
     return;
 #endif
@@ -1395,28 +1615,20 @@ void app_main(void)
         ESP_ERROR_CHECK(nvs_flash_init());
     }
 
-    /* 创建互斥信号量 */
-    g_rpm_mutex = xSemaphoreCreateMutex();
-    assert(g_rpm_mutex);
-
-    /* 8-LED tachometer uses the VCU/MCU speed field updated in the CAN callback. */
-    ws2815_rpm_bar_start(&g_current_rpm);
-
-    /* GPIO20/19 are independent of the RGB-ID pins used while LCD probes its
-     * panel.  Start CAN here so reception is already active during the LVGL
-     * and display startup sequence. */
+    /* GPIO15/14 connect to the external CAN transceiver.  The MIPI-only LCD
+     * path does not probe or claim the optional RGB data pins. */
     ESP_LOGI(TAG, "Initializing CAN (TX:%d, RX:%d)...", CAN_TX_PIN, CAN_RX_PIN);
-    vehicle_can_init();
+    ami_display_can_init();
     if (bsp_can_init(CAN_TX_PIN, CAN_RX_PIN, can_data_callback) == 0)
     {
         ESP_LOGI(TAG, "CAN initialized successfully");
     }
     else
     {
-        ESP_LOGW(TAG, "CAN initialization failed; RPM bar remains in standby");
+        ESP_LOGW(TAG, "CAN initialization failed");
     }
 
-    /* 初始化I2C总线 (XL9555 IO扩展器使用) */
+    /* 初始化 I2C 总线（触摸/正点原子参考外设共用）。 */
     ret = myiic_init();
     if (ret != ESP_OK)
     {
@@ -1427,7 +1639,9 @@ void app_main(void)
         ESP_LOGI(TAG, "I2C initialized (SCL=32, SDA=33)");
     }
 
-    /* 初始化XL9555 IO扩展器 (EXIO8/9/10为输入) */
+    /* 开发板参考设计的 XL9555 在自制板上未装配，不能轮询一个不存在的
+     * I2C 地址；GPIO5 已承担本板的主界面按键。 */
+#if BOARD_HAS_XL9555
     ret = xl9555_init(bus_handle);
     if (ret != ESP_OK)
     {
@@ -1437,6 +1651,9 @@ void app_main(void)
     {
         ESP_LOGI(TAG, "XL9555 initialized (EXIO8/9/10 inputs)");
     }
+#else
+    ESP_LOGI(TAG, "XL9555 not populated; EXIO buttons disabled");
+#endif
 
     gpio_config_t boot_cfg = {
         .pin_bit_mask = 1ULL << BOOT_GPIO_PIN,
@@ -1448,14 +1665,25 @@ void app_main(void)
     ESP_ERROR_CHECK(gpio_config(&boot_cfg));
     ESP_LOGI(TAG, "BOOT initialized (GPIO%d)", BOOT_GPIO_PIN);
 
+    const gpio_config_t ami_button_cfg = {
+        .pin_bit_mask = 1ULL << AMI_BUTTON_GPIO,
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    ESP_ERROR_CHECK(gpio_config(&ami_button_cfg));
+    ESP_LOGI(TAG, "AMI task button initialized (GPIO%d, active-low; short=next, long=open)",
+             AMI_BUTTON_GPIO);
+
     /* 初始化LVGL显示 */
     lvgl_demo(); /* 运行LVGL例程 */
 
     /* 创建独立CAN接收调试页；启动页保持AUTONOMOUS原界面。 */
     autonomous_can_dashboard_init();
 
-    /* GPIO3 is sampled as the panel-ID M2 line during lcd_init().  Configure
-     * it as the EC11 push input only after LVGL/LCD initialisation completes. */
+    /* The custom-board MIPI driver does not consume GPIO2/3/4 for panel
+     * identification, so initialise the EC11 after the display is ready. */
 #if ROTARY_INPUT_ENABLE
     ESP_ERROR_CHECK(rotary_input_init());
 #endif
@@ -1469,18 +1697,6 @@ void app_main(void)
         3,
         NULL,
         tskNO_AFFINITY);
-
-#if RPM_INTERNAL_DEMO_ENABLE
-    xTaskCreatePinnedToCore(
-        rpm_internal_demo_task,
-        "rpm_demo",
-        3072,
-        NULL,
-        2,
-        NULL,
-        tskNO_AFFINITY);
-    ESP_LOGW(TAG, "Internal RPM demo enabled: 0 -> 5000 -> 0 RPM");
-#endif
 
     ESP_LOGI(TAG, "System started");
 }
