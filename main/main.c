@@ -370,28 +370,32 @@ static void lcd_minimal_test(void)
 static void can_data_callback(uint32_t can_id, bool is_extended,
                               const uint8_t *data, uint8_t len)
 {
-    ami_display_can_snapshot_t safety_snapshot;
-    ami_display_can_get_snapshot(&safety_snapshot);
-    bool vehicle_safe = true;
-    if (ami_display_can_frame_is_fresh(&safety_snapshot.motor.meta, 500U) &&
-        fabsf(safety_snapshot.motor.motor_speed_rpm) > 50.0f) {
-        vehicle_safe = false;
-    }
-    if (ami_display_can_frame_is_fresh(&safety_snapshot.k2_command.meta, 500U) &&
-        fabsf(safety_snapshot.k2_command.speed_rpm) > 50.0f) {
-        vehicle_safe = false;
-    }
-    if (ami_display_can_frame_is_fresh(&safety_snapshot.k2_status.meta, 500U) &&
-        fabsf(safety_snapshot.k2_status.speed_rpm) > 50.0f) {
-        vehicle_safe = false;
-    }
-    if (ami_display_can_frame_is_fresh(&safety_snapshot.control_status.meta, 500U) &&
-        safety_snapshot.control_status.sdc_closed) {
-        vehicle_safe = false;
-    }
-    if (can_ota_control_handle_frame(can_id, is_extended, data, len,
-                                     vehicle_safe)) {
-        return;
+    /* OTA work is completely dormant for normal dashboard traffic.  Only the
+     * dedicated standard identifier performs the extra safety checks. */
+    if (!is_extended && can_id == CAN_OTA_VCU_TO_AMI_ID) {
+        ami_display_can_snapshot_t safety_snapshot;
+        ami_display_can_get_snapshot(&safety_snapshot);
+        bool vehicle_safe = true;
+        if (ami_display_can_frame_is_fresh(&safety_snapshot.motor.meta, 500U) &&
+            fabsf(safety_snapshot.motor.motor_speed_rpm) > 50.0f) {
+            vehicle_safe = false;
+        }
+        if (ami_display_can_frame_is_fresh(&safety_snapshot.k2_command.meta, 500U) &&
+            fabsf(safety_snapshot.k2_command.speed_rpm) > 50.0f) {
+            vehicle_safe = false;
+        }
+        if (ami_display_can_frame_is_fresh(&safety_snapshot.k2_status.meta, 500U) &&
+            fabsf(safety_snapshot.k2_status.speed_rpm) > 50.0f) {
+            vehicle_safe = false;
+        }
+        if (ami_display_can_frame_is_fresh(&safety_snapshot.control_status.meta, 500U) &&
+            safety_snapshot.control_status.sdc_closed) {
+            vehicle_safe = false;
+        }
+        if (can_ota_control_handle_frame(can_id, is_extended, data, len,
+                                         vehicle_safe)) {
+            return;
+        }
     }
 
     const bool recognized = ami_display_can_receive(can_id, is_extended, data, len);

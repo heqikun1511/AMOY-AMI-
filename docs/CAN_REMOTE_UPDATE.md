@@ -80,6 +80,12 @@ from a lost acknowledgement by querying the committed byte offset. If power is
 lost after `ota_0` has been erased, the immutable Recovery application remains
 bootable and waits for the transfer to be repeated.
 
+Recovery does not run concurrently with LVGL. If an authenticated entry request
+is accepted but no `START` command or query arrives for 30 seconds, Recovery
+validates and returns to the existing dashboard automatically. An `ABORT`
+command also returns immediately when the previous dashboard image has not yet
+been erased. Normal dashboard CAN traffic never executes the OTA safety path.
+
 The dashboard rejects the enter-Recovery command with status `09` if a fresh
 motor frame reports more than 50 rpm or a fresh control-status frame reports
 the shutdown circuit closed. With no fresh vehicle-status traffic, workshop

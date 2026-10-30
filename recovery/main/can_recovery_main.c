@@ -50,6 +50,7 @@
 #define TARGET_MAIN      1U
 #define FLOW_WINDOW      32U
 #define SESSION_TIMEOUT_MS 30000U
+#define ENTRY_WAIT_TIMEOUT_MS 30000U
 #define CAN_OTA_REQUEST_MAGIC 0x43414E55UL
 
 typedef enum {
@@ -77,6 +78,10 @@ typedef struct {
 
 static const char *TAG = "CAN_RECOVERY";
 static update_context_t s_update;
+static bool s_update_request_present;
+static bool s_idle_return_attempted;
+
+static bool return_to_existing_main(void);
 
 static uint32_t get_u32_le(const uint8_t *p)
 {
@@ -217,6 +222,7 @@ static void process_start(const uint8_t data[8])
     s_update.last_error = STATUS_OK;
     s_update.last_activity = xTaskGetTickCount();
     (void)set_request_marker(true);
+    s_update_request_present = true;
 
     uint8_t reply[8] = { OP_START_ACK, session, STATUS_OK, FLOW_WINDOW,
                          0, 0, 0, 0 };
@@ -338,6 +344,7 @@ static void process_activate(const uint8_t data[8])
         send_error(session, STATUS_FLASH, OP_ACTIVATE);
         return;
     }
+    s_update_request_present = false;
 
     uint8_t reply[8] = { OP_ACTIVATE_ACK, session, STATUS_OK, data[6],
                          0, 0, 0, 0 };
@@ -355,10 +362,15 @@ static void process_abort(const uint8_t data[8])
     abort_transfer();
     uint8_t reply[8] = { OP_ABORT_ACK, session, STATUS_OK, 0, 0, 0, 0, 0 };
     (void)can_send(reply);
+    vTaskDelay(pdMS_TO_TICKS(100));
+    if (!return_to_existing_main()) {
+        ESP_LOGW(TAG, "No valid previous main image; remaining in Recovery");
+    }
 }
 
 static void process_query(const uint8_t data[8])
 {
+    s_update.last_activity = xTaskGetTickCount();
     uint8_t reply[8] = { OP_STATUS, data[1], (uint8_t)s_update.state,
                          s_update.next_sequence, 0, 0, 0, 0 };
     put_u32_le(&reply[4], s_update.received);
@@ -422,7 +434,41 @@ static void recovery_loop(void)
             abort_transfer();
             send_error(session, STATUS_TIMEOUT, OP_DATA_MIN);
         }
+
+        if (s_update.state == UPDATE_IDLE && s_update_request_present &&
+            !s_idle_return_attempted &&
+            (xTaskGetTickCount() - s_update.last_activity) >
+                pdMS_TO_TICKS(ENTRY_WAIT_TIMEOUT_MS)) {
+            s_idle_return_attempted = true;
+            ESP_LOGW(TAG, "No START received for 30 seconds; returning to dashboard");
+            if (!return_to_existing_main()) {
+                ESP_LOGW(TAG, "Previous main image is invalid; Recovery remains active");
+            }
+        }
     }
+}
+
+static bool return_to_existing_main(void)
+{
+    if (!s_update.target) {
+        return false;
+    }
+
+    esp_err_t err = esp_ota_set_boot_partition(s_update.target);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Cannot boot existing ota_0: %s", esp_err_to_name(err));
+        return false;
+    }
+
+    err = set_request_marker(false);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Could not clear update marker: %s", esp_err_to_name(err));
+    }
+    s_update_request_present = false;
+    ESP_LOGI(TAG, "Returning to existing dashboard image");
+    vTaskDelay(pdMS_TO_TICKS(200));
+    esp_restart();
+    return true;
 }
 
 static void maybe_boot_existing_main(bool update_requested)
@@ -440,14 +486,9 @@ static void maybe_boot_existing_main(bool update_requested)
         return;
     }
 
-    esp_err_t err = esp_ota_set_boot_partition(s_update.target);
-    if (err == ESP_OK) {
-        ESP_LOGI(TAG, "Existing ota_0 is valid; booting dashboard");
-        vTaskDelay(pdMS_TO_TICKS(300));
-        esp_restart();
+    if (!return_to_existing_main()) {
+        ESP_LOGW(TAG, "No valid ota_0 image; staying in Recovery");
     }
-    ESP_LOGW(TAG, "No valid ota_0 image; staying in Recovery (%s)",
-             esp_err_to_name(err));
 }
 
 void app_main(void)
@@ -477,6 +518,8 @@ void app_main(void)
     ESP_ERROR_CHECK(twai_start());
 
     bool requested = request_marker_is_set();
+    s_update_request_present = requested;
+    s_update.last_activity = xTaskGetTickCount();
     ESP_LOGW(TAG, "CAN Recovery ready: RX=0x%03X TX=0x%03X requested=%d",
              CAN_OTA_RX_ID, CAN_OTA_TX_ID, requested);
     send_ready();
