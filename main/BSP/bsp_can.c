@@ -62,8 +62,8 @@ int bsp_can_init(int tx_pin, int rx_pin, can_data_callback_t callback)
     );
     g_config.rx_queue_len = 32;
 
-    /* TWAI时序配置: 250kbps */
-    twai_timing_config_t t_config = TWAI_TIMING_CONFIG_250KBITS();
+    /* TWAI时序配置: 500kbps */
+    twai_timing_config_t t_config = TWAI_TIMING_CONFIG_500KBITS();
 
     /* 滤波配置: 接收全部标准和扩展帧；DBC 分发由应用层完成。 */
     twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
@@ -75,7 +75,7 @@ int bsp_can_init(int tx_pin, int rx_pin, can_data_callback_t callback)
         ESP_LOGE(TAG, "Failed to install TWAI driver: %s", esp_err_to_name(ret));
         return -1;
     }
-    ESP_LOGI(TAG, "TWAI driver installed (TX:%d, RX:%d, 250kbps)", tx_pin, rx_pin);
+    ESP_LOGI(TAG, "TWAI driver installed (TX:%d, RX:%d, 500kbps)", tx_pin, rx_pin);
 
     /* 启动TWAI */
     ret = twai_start();
@@ -135,10 +135,20 @@ int bsp_can_get_status(bsp_can_status_t *status)
  * @param       len    : 数据长度(≤8)
  * @retval      0:成功 -1:失败
  */
-int bsp_can_send(uint32_t can_id, uint8_t *data, uint8_t len)
+static int bsp_can_send_frame(uint32_t can_id, bool is_extended,
+                              const uint8_t *data, uint8_t len)
 {
+    if ((!is_extended && can_id > 0x7FFU) ||
+        (is_extended && can_id > 0x1FFFFFFFU))
+    {
+        ESP_LOGE(TAG, "Invalid %s CAN ID: 0x%08lX",
+                 is_extended ? "extended" : "standard",
+                 (unsigned long)can_id);
+        return -1;
+    }
+
     twai_message_t tx_msg = {
-        .extd = 1,                          /* 扩展帧 */
+        .extd = is_extended,
         .identifier = can_id,
         .data_length_code = (len > 8) ? 8 : len,
     };
@@ -158,4 +168,14 @@ int bsp_can_send(uint32_t can_id, uint8_t *data, uint8_t len)
         return -1;
     }
     return 0;
+}
+
+int bsp_can_send(uint32_t can_id, uint8_t *data, uint8_t len)
+{
+    return bsp_can_send_frame(can_id, true, data, len);
+}
+
+int bsp_can_send_standard(uint32_t can_id, const uint8_t *data, uint8_t len)
+{
+    return bsp_can_send_frame(can_id, false, data, len);
 }

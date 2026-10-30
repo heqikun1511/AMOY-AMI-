@@ -75,12 +75,12 @@ static void lcd_backlight_boot_prepare(void)
  * The old dashboard, touch, rotary, LEDs, buttons and I2C expander are not
  * initialised. */
 #define SCREEN_CAN_TEST_ONLY 0
-/* Normal AMI operation is receive-only.  TWAI still acknowledges valid CAN
- * frames at the CAN physical/protocol layer. */
+/* Disable only the stand-alone diagnostic's periodic test transmission.
+ * Confirmed AMI task selections are still sent on CAN ID 0x650. */
 #define AMI_RECEIVE_ONLY 1
 
-/* Keep the optional rotary input disabled while diagnosing the CAN bus. */
-#define ROTARY_INPUT_ENABLE 0
+/* EC11 selects and confirms the AMI task. */
+#define ROTARY_INPUT_ENABLE 1
 
 /* This custom AMI PCB does not populate the development-board XL9555.  Keep
  * its source available for the reference build, but do not issue I2C traffic
@@ -383,6 +383,7 @@ static void driving_demo_start(void)
 
 #define AMI_SELECTION_COUNT 6
 #define INSPECT_STAGE_COUNT 5
+#define AMI_TASK_COMMAND_CAN_ID 0x650U
 
 static const char *const s_ami_task_names[AMI_SELECTION_COUNT] = {
     "MANUAL DRIVING",
@@ -401,6 +402,18 @@ static const char *const s_autonomous_task_labels[AMI_SELECTION_COUNT] = {
     "TASK: TRACK",
     "TASK: EBS",
     "TASK: INSPECT",
+};
+
+/* The on-screen clockwise order differs from the task values defined by the
+ * vehicle protocol: manual=1, inspection=2, EBS=3, acceleration=4,
+ * skidpad=5, trackdrive=6.  Value 0 is reserved for "task not issued". */
+static const uint8_t s_ami_task_can_values[AMI_SELECTION_COUNT] = {
+    1, /* MANUAL DRIVING */
+    4, /* ACCELERATION */
+    5, /* SKIDPAD / figure eight */
+    6, /* TRACKDRIVE */
+    3, /* EBS TEST */
+    2, /* INSPECTION */
 };
 
 static lv_obj_t *s_can_dashboard;
@@ -1099,6 +1112,24 @@ static void ami_show_rotary_debug(void)
 static void ami_open_selection(uint8_t selected, uint8_t *inspect_stage,
                                bool *inspect_led_on, TickType_t *inspect_blink_tick)
 {
+    if (selected >= AMI_SELECTION_COUNT) {
+        ESP_LOGE(TAG, "Cannot send invalid AMI selection=%u", selected);
+        return;
+    }
+
+    uint8_t task_frame[8] = {0};
+    task_frame[0] = s_ami_task_can_values[selected];
+    if (bsp_can_send_standard(AMI_TASK_COMMAND_CAN_ID,
+                              task_frame, sizeof(task_frame)) == 0) {
+        ESP_LOGI(TAG, "TX standard CAN ID=0x%03X DLC=8 task=%u (%s)",
+                 AMI_TASK_COMMAND_CAN_ID, task_frame[0],
+                 s_ami_task_names[selected]);
+    } else {
+        ESP_LOGE(TAG, "Failed to send task=%u (%s) on CAN ID=0x%03X",
+                 task_frame[0], s_ami_task_names[selected],
+                 AMI_TASK_COMMAND_CAN_ID);
+    }
+
     if (selected == AMI_SELECTION_COUNT - 1) {
         *inspect_stage = 0;
         *inspect_led_on = false;

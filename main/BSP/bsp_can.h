@@ -38,4 +38,13 @@ int bsp_can_get_status(bsp_can_status_t *status);
  */
 int bsp_can_send(uint32_t can_id, uint8_t *data, uint8_t len);
 
+/**
+ * @brief       发送CAN标准帧
+ * @param       can_id : 11位标准帧ID
+ * @param       data   : 数据缓冲区
+ * @param       len    : 数据长度(≤8)
+ * @retval      0:成功 -1:失败
+ */
+int bsp_can_send_standard(uint32_t can_id, const uint8_t *data, uint8_t len);
+
 #endif
