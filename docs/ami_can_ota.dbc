@@ -1,0 +1,146 @@
+VERSION "AMI CAN OTA Protocol 1.0"
+
+NS_ :
+    NS_DESC_
+    CM_
+    BA_DEF_
+    BA_
+    VAL_
+    CAT_DEF_
+    CAT_
+    FILTER
+    BA_DEF_DEF_
+    EV_DATA_
+    ENVVAR_DATA_
+    SGTYPE_
+    SGTYPE_VAL_
+    BA_DEF_SGTYPE_
+    BA_SGTYPE_
+    SIG_TYPE_REF_
+    VAL_TABLE_
+    SIG_GROUP_
+    SIG_VALTYPE_
+    SIGTYPE_VALTYPE_
+    BO_TX_BU_
+    BA_DEF_REL_
+    BA_REL_
+    BA_DEF_DEF_REL_
+    BU_SG_REL_
+    BU_EV_REL_
+    BU_BO_REL_
+    SG_MUL_VAL_
+
+BS_:
+
+BU_: VCU AMI
+
+
+BO_ 1760 CAN_OTA_VCU_To_AMI: 8 VCU
+ SG_ RxOpcode M : 0|8@1+ (1,0) [0|255] "" AMI
+ SG_ EnterSession m1 : 8|8@1+ (1,0) [0|255] "" AMI
+ SG_ EnterKey0 m1 : 16|8@1+ (1,0) [0|255] "" AMI
+ SG_ EnterKey1 m1 : 24|8@1+ (1,0) [0|255] "" AMI
+ SG_ EnterKey2 m1 : 32|8@1+ (1,0) [0|255] "" AMI
+ SG_ EnterKey3 m1 : 40|8@1+ (1,0) [0|255] "" AMI
+ SG_ EnterKey4 m1 : 48|8@1+ (1,0) [0|255] "" AMI
+ SG_ EnterKey5 m1 : 56|8@1+ (1,0) [0|255] "" AMI
+ SG_ StartSession m16 : 8|8@1+ (1,0) [0|255] "" AMI
+ SG_ StartTarget m16 : 16|8@1+ (1,0) [0|255] "" AMI
+ SG_ StartFlags m16 : 24|8@1+ (1,0) [0|255] "" AMI
+ SG_ StartImageSize m16 : 32|32@1+ (1,0) [0|12582912] "byte" AMI
+ SG_ EndSession m17 : 8|8@1+ (1,0) [0|255] "" AMI
+ SG_ EndImageCRC32 m17 : 16|32@1+ (1,0) [0|4294967295] "" AMI
+ SG_ EndImageVersion m17 : 48|16@1+ (1,0) [0|65535] "" AMI
+ SG_ ActivateSession m18 : 8|8@1+ (1,0) [0|255] "" AMI
+ SG_ ActivateKey m18 : 16|32@1+ (1,0) [0|4294967295] "" AMI
+ SG_ ActivateDelay m18 : 48|8@1+ (100,0) [0|25500] "ms" AMI
+ SG_ ActivateReserved m18 : 56|8@1+ (1,0) [0|255] "" AMI
+ SG_ AbortSession m19 : 8|8@1+ (1,0) [0|255] "" AMI
+ SG_ QuerySession m20 : 8|8@1+ (1,0) [0|255] "" AMI
+ SG_ DataByte1 m128 : 8|8@1+ (1,0) [0|255] "" AMI
+ SG_ DataByte2 m128 : 16|8@1+ (1,0) [0|255] "" AMI
+ SG_ DataByte3 m128 : 24|8@1+ (1,0) [0|255] "" AMI
+ SG_ DataByte4 m128 : 32|8@1+ (1,0) [0|255] "" AMI
+ SG_ DataByte5 m128 : 40|8@1+ (1,0) [0|255] "" AMI
+ SG_ DataByte6 m128 : 48|8@1+ (1,0) [0|255] "" AMI
+ SG_ DataByte7 m128 : 56|8@1+ (1,0) [0|255] "" AMI
+
+BO_ 1761 CAN_OTA_AMI_To_VCU: 8 AMI
+ SG_ TxOpcode M : 0|8@1+ (1,0) [0|255] "" VCU
+ SG_ EnterAckSession m129 : 8|8@1+ (1,0) [0|255] "" VCU
+ SG_ EnterAckStatus m129 : 16|8@1+ (1,0) [0|11] "" VCU
+ SG_ EnterAckRecovery m129 : 24|8@1+ (1,0) [0|1] "" VCU
+ SG_ ReadyStatus m144 : 16|8@1+ (1,0) [0|11] "" VCU
+ SG_ ReadyProtocolVersion m144 : 24|8@1+ (1,0) [0|255] "" VCU
+ SG_ ReadyPartitionSize m144 : 32|32@1+ (1,0) [0|12582912] "byte" VCU
+ SG_ StartAckSession m145 : 8|8@1+ (1,0) [0|255] "" VCU
+ SG_ StartAckStatus m145 : 16|8@1+ (1,0) [0|11] "" VCU
+ SG_ StartAckWindow m145 : 24|8@1+ (1,0) [0|64] "frame" VCU
+ SG_ StartAckPartitionSize m145 : 32|32@1+ (1,0) [0|12582912] "byte" VCU
+ SG_ DataAckSession m146 : 8|8@1+ (1,0) [0|255] "" VCU
+ SG_ DataAckStatus m146 : 16|8@1+ (1,0) [0|11] "" VCU
+ SG_ DataAckNextSequence m146 : 24|8@1+ (1,0) [0|127] "" VCU
+ SG_ DataAckReceivedSize m146 : 32|32@1+ (1,0) [0|12582912] "byte" VCU
+ SG_ VerifySession m147 : 8|8@1+ (1,0) [0|255] "" VCU
+ SG_ VerifyStatus m147 : 16|8@1+ (1,0) [0|11] "" VCU
+ SG_ VerifyState m147 : 24|8@1+ (1,0) [0|2] "" VCU
+ SG_ VerifyReceivedSize m147 : 32|32@1+ (1,0) [0|12582912] "byte" VCU
+ SG_ StatusSession m148 : 8|8@1+ (1,0) [0|255] "" VCU
+ SG_ StatusUpdateState m148 : 16|8@1+ (1,0) [0|2] "" VCU
+ SG_ StatusNextSequence m148 : 24|8@1+ (1,0) [0|127] "" VCU
+ SG_ StatusReceivedSize m148 : 32|32@1+ (1,0) [0|12582912] "byte" VCU
+ SG_ ActivateAckSession m149 : 8|8@1+ (1,0) [0|255] "" VCU
+ SG_ ActivateAckStatus m149 : 16|8@1+ (1,0) [0|11] "" VCU
+ SG_ ActivateAckDelay m149 : 24|8@1+ (100,0) [0|25500] "ms" VCU
+ SG_ ActivateAckReceivedSize m149 : 32|32@1+ (1,0) [0|12582912] "byte" VCU
+ SG_ AbortAckSession m150 : 8|8@1+ (1,0) [0|255] "" VCU
+ SG_ AbortAckStatus m150 : 16|8@1+ (1,0) [0|11] "" VCU
+ SG_ ErrorSession m255 : 8|8@1+ (1,0) [0|255] "" VCU
+ SG_ ErrorCode m255 : 16|8@1+ (1,0) [0|11] "" VCU
+ SG_ ErrorCommand m255 : 24|8@1+ (1,0) [0|255] "" VCU
+ SG_ ErrorReceivedSize m255 : 32|32@1+ (1,0) [0|12582912] "byte" VCU
+
+
+CM_ BO_ 1760 "Event-driven VCU-to-AMI CAN firmware update protocol. Classic CAN, 11-bit identifier, DLC 8, 500 kbit/s.";
+CM_ SG_ 1760 RxOpcode "For data frames, bit 7 is 1 and bits 6..0 are the sequence number modulo 128.";
+CM_ SG_ 1760 EnterKey0 "Must be ASCII B (0x42).";
+CM_ SG_ 1760 EnterKey1 "Must be ASCII O (0x4F).";
+CM_ SG_ 1760 EnterKey2 "Must be ASCII O (0x4F).";
+CM_ SG_ 1760 EnterKey3 "Must be ASCII T (0x54).";
+CM_ SG_ 1760 EnterKey4 "Must be ASCII ! (0x21).";
+CM_ SG_ 1760 EnterKey5 "Must be 0xA5.";
+CM_ SG_ 1760 StartTarget "Only value 1 is valid and selects the fixed main/ota_0 partition.";
+CM_ SG_ 1760 EndImageCRC32 "CRC-32/ISO-HDLC over exactly StartImageSize firmware bytes. Padding in the final CAN frame is excluded.";
+CM_ SG_ 1760 ActivateKey "Little-endian byte sequence A5 5A C3 3C; numeric value 0x3CC35AA5.";
+CM_ SG_ 1760 DataByte1 "First payload byte. DataByte1..DataByte7 are valid for every RxOpcode in range 0x80..0xFF.";
+
+CM_ BO_ 1761 "Event-driven AMI/Recovery response for CAN firmware update.";
+CM_ SG_ 1761 ErrorReceivedSize "Byte offset reached when the error was generated.";
+
+VAL_ 1760 RxOpcode 1 "ENTER_RECOVERY" 16 "START" 17 "END_VERIFY" 18 "ACTIVATE" 19 "ABORT" 20 "QUERY" ;
+VAL_ 1760 StartTarget 1 "MAIN_OTA_0" ;
+
+VAL_ 1761 TxOpcode 129 "ENTER_ACK" 144 "RECOVERY_READY" 145 "START_ACK" 146 "DATA_ACK" 147 "VERIFY_ACK" 148 "STATUS" 149 "ACTIVATE_ACK" 150 "ABORT_ACK" 255 "ERROR" ;
+VAL_ 1761 EnterAckStatus 0 "OK" 1 "INVALID_COMMAND" 2 "SESSION" 3 "LENGTH" 4 "SEQUENCE" 5 "FLASH" 6 "CRC" 7 "INVALID_IMAGE" 9 "UNSAFE_STATE" 10 "TIMEOUT" 11 "BUSY" ;
+VAL_ 1761 ReadyStatus 0 "OK" 1 "INVALID_COMMAND" 2 "SESSION" 3 "LENGTH" 4 "SEQUENCE" 5 "FLASH" 6 "CRC" 7 "INVALID_IMAGE" 9 "UNSAFE_STATE" 10 "TIMEOUT" 11 "BUSY" ;
+VAL_ 1761 StartAckStatus 0 "OK" 1 "INVALID_COMMAND" 2 "SESSION" 3 "LENGTH" 4 "SEQUENCE" 5 "FLASH" 6 "CRC" 7 "INVALID_IMAGE" 9 "UNSAFE_STATE" 10 "TIMEOUT" 11 "BUSY" ;
+VAL_ 1761 DataAckStatus 0 "OK" 1 "INVALID_COMMAND" 2 "SESSION" 3 "LENGTH" 4 "SEQUENCE" 5 "FLASH" 6 "CRC" 7 "INVALID_IMAGE" 9 "UNSAFE_STATE" 10 "TIMEOUT" 11 "BUSY" ;
+VAL_ 1761 VerifyStatus 0 "OK" 1 "INVALID_COMMAND" 2 "SESSION" 3 "LENGTH" 4 "SEQUENCE" 5 "FLASH" 6 "CRC" 7 "INVALID_IMAGE" 9 "UNSAFE_STATE" 10 "TIMEOUT" 11 "BUSY" ;
+VAL_ 1761 ActivateAckStatus 0 "OK" 1 "INVALID_COMMAND" 2 "SESSION" 3 "LENGTH" 4 "SEQUENCE" 5 "FLASH" 6 "CRC" 7 "INVALID_IMAGE" 9 "UNSAFE_STATE" 10 "TIMEOUT" 11 "BUSY" ;
+VAL_ 1761 AbortAckStatus 0 "OK" 1 "INVALID_COMMAND" 2 "SESSION" 3 "LENGTH" 4 "SEQUENCE" 5 "FLASH" 6 "CRC" 7 "INVALID_IMAGE" 9 "UNSAFE_STATE" 10 "TIMEOUT" 11 "BUSY" ;
+VAL_ 1761 ErrorCode 0 "OK" 1 "INVALID_COMMAND" 2 "SESSION" 3 "LENGTH" 4 "SEQUENCE" 5 "FLASH" 6 "CRC" 7 "INVALID_IMAGE" 9 "UNSAFE_STATE" 10 "TIMEOUT" 11 "BUSY" ;
+VAL_ 1761 VerifyState 0 "IDLE" 1 "RECEIVING" 2 "VERIFIED" ;
+VAL_ 1761 StatusUpdateState 0 "IDLE" 1 "RECEIVING" 2 "VERIFIED" ;
+
+BA_DEF_ BO_ "GenMsgCycleTime" INT 0 65535;
+BA_DEF_DEF_ "GenMsgCycleTime" 0;
+BA_ "GenMsgCycleTime" BO_ 1760 0;
+BA_ "GenMsgCycleTime" BO_ 1761 0;
+
+SG_MUL_VAL_ 1760 DataByte1 RxOpcode 128-255;
+SG_MUL_VAL_ 1760 DataByte2 RxOpcode 128-255;
+SG_MUL_VAL_ 1760 DataByte3 RxOpcode 128-255;
+SG_MUL_VAL_ 1760 DataByte4 RxOpcode 128-255;
+SG_MUL_VAL_ 1760 DataByte5 RxOpcode 128-255;
+SG_MUL_VAL_ 1760 DataByte6 RxOpcode 128-255;
+SG_MUL_VAL_ 1760 DataByte7 RxOpcode 128-255;

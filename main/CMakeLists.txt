@@ -12,6 +12,7 @@ idf_component_register(
     REQUIRES
         driver
         nvs_flash
+        app_update
         esp_timer
         espressif__esp_tinyusb
         BSP)

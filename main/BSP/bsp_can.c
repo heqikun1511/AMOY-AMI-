@@ -12,6 +12,39 @@ static TaskHandle_t s_can_rx_task = NULL;
 /* 用户回调函数 */
 static can_data_callback_t s_user_callback = NULL;
 
+static void can_process_alerts(void)
+{
+    uint32_t alerts = 0;
+    if (twai_read_alerts(&alerts, 0) != ESP_OK) {
+        return;
+    }
+
+    if (alerts & TWAI_ALERT_RX_QUEUE_FULL) {
+        ESP_LOGE(TAG, "RX queue full; CAN frames were dropped");
+    }
+    if (alerts & TWAI_ALERT_ABOVE_ERR_WARN) {
+        ESP_LOGW(TAG, "CAN error counter above warning limit");
+    }
+    if (alerts & TWAI_ALERT_ERR_PASS) {
+        ESP_LOGE(TAG, "CAN controller entered error-passive state");
+    }
+    if (alerts & TWAI_ALERT_BUS_OFF) {
+        ESP_LOGE(TAG, "CAN controller BUS-OFF; starting recovery");
+        esp_err_t ret = twai_initiate_recovery();
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to initiate CAN recovery: %s", esp_err_to_name(ret));
+        }
+    }
+    if (alerts & TWAI_ALERT_BUS_RECOVERED) {
+        ESP_LOGW(TAG, "CAN bus recovered; restarting controller");
+        esp_err_t ret = twai_start();
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to restart recovered CAN controller: %s",
+                     esp_err_to_name(ret));
+        }
+    }
+}
+
 /**=                                                        
  * @brief       CAN接收任务
  * @param       arg : 未使用
@@ -38,6 +71,7 @@ static void can_rx_task(void *arg)
                 s_user_callback(can_id, rx_msg.extd, rx_msg.data, rx_msg.data_length_code);
             }
         }
+        can_process_alerts();
     }
 }
 
@@ -61,6 +95,11 @@ int bsp_can_init(int tx_pin, int rx_pin, can_data_callback_t callback)
         (gpio_num_t)tx_pin, (gpio_num_t)rx_pin, TWAI_MODE_NORMAL
     );
     g_config.rx_queue_len = 32;
+    g_config.alerts_enabled = TWAI_ALERT_RX_QUEUE_FULL |
+                              TWAI_ALERT_ABOVE_ERR_WARN |
+                              TWAI_ALERT_ERR_PASS |
+                              TWAI_ALERT_BUS_OFF |
+                              TWAI_ALERT_BUS_RECOVERED;
 
     /* TWAI时序配置: 500kbps */
     twai_timing_config_t t_config = TWAI_TIMING_CONFIG_500KBITS();

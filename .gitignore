@@ -1,5 +1,7 @@
 build/
 sdkconfig.old
+recovery/sdkconfig
+recovery/sdkconfig.old
 *.bin
 *.elf
 *.o
