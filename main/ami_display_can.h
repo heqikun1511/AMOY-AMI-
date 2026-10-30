@@ -12,10 +12,6 @@
 #define AMI_DISPLAY_CAN_ID_CONTROL_STATUS     0x624U
 #define AMI_DISPLAY_CAN_ID_ANGLES_AND_SOURCES 0x625U
 
-/* K2 motor-controller protocol compatibility frames (29-bit extended CAN). */
-#define K2_CAN_ID_VCU_TO_MCU_COMMAND 0x08C1EF21U
-#define K2_CAN_ID_MCU_TO_VCU_STATUS1 0x0CFFC6EFU
-
 typedef struct {
     bool valid;
     uint32_t rx_count;
@@ -67,24 +63,12 @@ typedef struct {
 } ami_display_can_angles_and_sources_t;
 
 typedef struct {
-    ami_display_can_frame_meta_t meta;
-    float speed_rpm;
-    float torque_permille;
-    uint8_t control_mode;
-    uint8_t gear;
-    bool main_contactor_closed;
-    float dc_bus_voltage_v;
-} ami_display_can_k2_motor_t;
-
-typedef struct {
     ami_display_can_motor_t motor;
     ami_display_can_pedals_t pedals;
     ami_display_can_as_status_t as_status;
     ami_display_can_electrical_t electrical;
     ami_display_can_control_status_t control_status;
     ami_display_can_angles_and_sources_t angles_and_sources;
-    ami_display_can_k2_motor_t k2_command;
-    ami_display_can_k2_motor_t k2_status;
     uint32_t rejected_dlc_count;
 } ami_display_can_snapshot_t;
 

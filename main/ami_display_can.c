@@ -25,19 +25,6 @@ static void update_meta(ami_display_can_frame_meta_t *meta, uint32_t now_ms)
     meta->last_rx_ms = now_ms;
 }
 
-static void decode_k2_motor(ami_display_can_k2_motor_t *motor,
-                            const uint8_t *data, uint32_t now_ms)
-{
-    /* K2 uses unsigned raw speed with 0.5 rpm/bit and -10000 rpm offset. */
-    motor->speed_rpm = (float)le_u16(&data[0]) * 0.5f - 10000.0f;
-    motor->torque_permille = (float)le_u16(&data[2]);
-    motor->control_mode = data[4];
-    motor->gear = data[5] & 0x03U;
-    motor->main_contactor_closed = (data[5] & 0x08U) != 0;
-    motor->dc_bus_voltage_v = (float)le_u16(&data[6]) * 0.1f;
-    update_meta(&motor->meta, now_ms);
-}
-
 void ami_display_can_init(void)
 {
     taskENTER_CRITICAL(&s_ami_display_can_lock);
@@ -48,17 +35,8 @@ void ami_display_can_init(void)
 bool ami_display_can_receive(uint32_t can_id, bool is_extended,
                              const uint8_t *data, uint8_t len)
 {
-    if (!data) {
-        return false;
-    }
-
-    const bool is_k2_command = is_extended && can_id == K2_CAN_ID_VCU_TO_MCU_COMMAND;
-    const bool is_k2_status = is_extended && can_id == K2_CAN_ID_MCU_TO_VCU_STATUS1;
-    const bool is_ami_standard = !is_extended &&
-                                 can_id >= AMI_DISPLAY_CAN_ID_MOTOR &&
-                                 can_id <= AMI_DISPLAY_CAN_ID_ANGLES_AND_SOURCES;
-
-    if (!is_k2_command && !is_k2_status && !is_ami_standard) {
+    if (is_extended || !data || can_id < AMI_DISPLAY_CAN_ID_MOTOR ||
+        can_id > AMI_DISPLAY_CAN_ID_ANGLES_AND_SOURCES) {
         return false;
     }
 
@@ -71,14 +49,6 @@ bool ami_display_can_receive(uint32_t can_id, bool is_extended,
 
     const uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
     taskENTER_CRITICAL(&s_ami_display_can_lock);
-    if (is_k2_command || is_k2_status) {
-        decode_k2_motor(is_k2_command ? &s_snapshot.k2_command
-                                      : &s_snapshot.k2_status,
-                        data, now_ms);
-        taskEXIT_CRITICAL(&s_ami_display_can_lock);
-        return true;
-    }
-
     switch (can_id) {
     case AMI_DISPLAY_CAN_ID_MOTOR:
         s_snapshot.motor.motor_speed_rpm = (float)le_i16(&data[0]);
@@ -172,7 +142,5 @@ bool ami_display_can_any_frame_is_fresh(const ami_display_can_snapshot_t *snapsh
            ami_display_can_frame_is_fresh(&snapshot->as_status.meta, timeout_ms) ||
            ami_display_can_frame_is_fresh(&snapshot->electrical.meta, timeout_ms) ||
            ami_display_can_frame_is_fresh(&snapshot->control_status.meta, timeout_ms) ||
-           ami_display_can_frame_is_fresh(&snapshot->angles_and_sources.meta, timeout_ms) ||
-           ami_display_can_frame_is_fresh(&snapshot->k2_command.meta, timeout_ms) ||
-           ami_display_can_frame_is_fresh(&snapshot->k2_status.meta, timeout_ms);
+           ami_display_can_frame_is_fresh(&snapshot->angles_and_sources.meta, timeout_ms);
 }

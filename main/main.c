@@ -5,7 +5,6 @@
 #include "nvs_flash.h"
 #include <stdio.h>
 #include <string.h>
-#include <math.h>
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_chip_info.h"
@@ -26,7 +25,6 @@
 #include "tinyusb_console.h"
 #include "tinyusb_default_config.h"
 #include "rotary_input.h"
-#include "can_ota_control.h"
 
 static const char *TAG = "MAIN";
 
@@ -272,7 +270,7 @@ static void can_screen_test_start(void)
         s_can_screen_test_tx = can_screen_test_label(screen, 690, &ui_font_orbitron_bold_25);
 
         lv_obj_t *pins = can_screen_test_label(screen, 820, &ui_font_orbitron_bold_25);
-        lv_label_set_text(pins, "CAN-B pins: GPIO15 = TX, GPIO14 = RX   |   Bit rate: 500 kbit/s   |   Standard + extended frames");
+        lv_label_set_text(pins, "CAN-B pins: GPIO15 = TX, GPIO14 = RX   |   Bit rate: 250 kbit/s   |   Standard + extended frames");
         lv_refr_now(NULL);
         lvgl_port_unlock();
     }
@@ -370,60 +368,7 @@ static void lcd_minimal_test(void)
 static void can_data_callback(uint32_t can_id, bool is_extended,
                               const uint8_t *data, uint8_t len)
 {
-    /* OTA work is completely dormant for normal dashboard traffic.  Only the
-     * dedicated standard identifier performs the extra safety checks. */
-    if (!is_extended && can_id == CAN_OTA_VCU_TO_AMI_ID) {
-        ami_display_can_snapshot_t safety_snapshot;
-        ami_display_can_get_snapshot(&safety_snapshot);
-        bool vehicle_safe = true;
-        if (ami_display_can_frame_is_fresh(&safety_snapshot.motor.meta, 500U) &&
-            fabsf(safety_snapshot.motor.motor_speed_rpm) > 50.0f) {
-            vehicle_safe = false;
-        }
-        if (ami_display_can_frame_is_fresh(&safety_snapshot.k2_command.meta, 500U) &&
-            fabsf(safety_snapshot.k2_command.speed_rpm) > 50.0f) {
-            vehicle_safe = false;
-        }
-        if (ami_display_can_frame_is_fresh(&safety_snapshot.k2_status.meta, 500U) &&
-            fabsf(safety_snapshot.k2_status.speed_rpm) > 50.0f) {
-            vehicle_safe = false;
-        }
-        if (ami_display_can_frame_is_fresh(&safety_snapshot.control_status.meta, 500U) &&
-            safety_snapshot.control_status.sdc_closed) {
-            vehicle_safe = false;
-        }
-        if (can_ota_control_handle_frame(can_id, is_extended, data, len,
-                                         vehicle_safe)) {
-            return;
-        }
-    }
-
-    const bool recognized = ami_display_can_receive(can_id, is_extended, data, len);
-    if (!recognized) {
-        ESP_LOGD(TAG, "Ignored %s CAN frame ID=0x%08lX DLC=%u",
-                 is_extended ? "extended" : "standard",
-                 (unsigned long)can_id, len);
-        return;
-    }
-
-    /* Rate-limit K2 confirmation logging because normal traffic is 50 Hz. */
-    if (is_extended &&
-        (can_id == K2_CAN_ID_VCU_TO_MCU_COMMAND ||
-         can_id == K2_CAN_ID_MCU_TO_VCU_STATUS1)) {
-        static uint32_t k2_frame_count;
-        if ((k2_frame_count++ % 50U) == 0U) {
-            ami_display_can_snapshot_t snapshot;
-            ami_display_can_get_snapshot(&snapshot);
-            const ami_display_can_k2_motor_t *motor =
-                can_id == K2_CAN_ID_VCU_TO_MCU_COMMAND
-                    ? &snapshot.k2_command : &snapshot.k2_status;
-            ESP_LOGI(TAG,
-                     "K2 RX ID=0x%08lX speed=%.0f rpm torque=%.0f gear=%u bus=%.1f V",
-                     (unsigned long)can_id, motor->speed_rpm,
-                     motor->torque_permille, motor->gear,
-                     motor->dc_bus_voltage_v);
-        }
-    }
+    (void)ami_display_can_receive(can_id, is_extended, data, len);
 }
 
 /* The display is driven only by the AMI DBC stream once a task is entered. */
@@ -727,28 +672,12 @@ static void autonomous_can_dashboard_update(const ami_display_can_snapshot_t *da
                                                                 AMI_DBC_FRAME_TIMEOUT_MS);
     const bool angles_fresh = ami_display_can_frame_is_fresh(&data->angles_and_sources.meta,
                                                                AMI_DBC_FRAME_TIMEOUT_MS);
-    const bool k2_status_fresh = ami_display_can_frame_is_fresh(&data->k2_status.meta,
-                                                                  AMI_DBC_FRAME_TIMEOUT_MS);
-    const bool k2_command_fresh = ami_display_can_frame_is_fresh(&data->k2_command.meta,
-                                                                   AMI_DBC_FRAME_TIMEOUT_MS);
     /* The gateway transmits zero for an upstream timeout.  When its source
      * status is available, prefer an explicit dash to a believable zero. */
     const bool motor_speed_valid = motor_fresh &&
         (!angles_fresh || data->angles_and_sources.source_state[3] == 1);
     const bool electrical_values_valid = electrical_fresh &&
         (!angles_fresh || data->angles_and_sources.source_state[4] == 1);
-    const bool displayed_speed_valid = motor_speed_valid ||
-                                       k2_status_fresh || k2_command_fresh;
-    const float displayed_speed = motor_speed_valid ? data->motor.motor_speed_rpm :
-                                  k2_status_fresh ? data->k2_status.speed_rpm :
-                                                    data->k2_command.speed_rpm;
-    const bool displayed_bus_valid = electrical_values_valid ||
-                                     k2_status_fresh || k2_command_fresh;
-    const float displayed_bus = electrical_values_valid
-                                    ? data->electrical.drive_bus_voltage_v
-                                    : k2_status_fresh
-                                          ? data->k2_status.dc_bus_voltage_v
-                                          : data->k2_command.dc_bus_voltage_v;
 
     autonomous_status_indicators(data, pedals_fresh, as_fresh, control_fresh);
 
@@ -762,8 +691,8 @@ static void autonomous_can_dashboard_update(const ami_display_can_snapshot_t *da
 
     char speed[20], power[20], throttle[20], brake[20];
     char controller_temp[20], motor_temp[20], dc_bus[20], dc_current[20], steering[20];
-    dbc_value_or_dash(speed, sizeof(speed), displayed_speed_valid, "%.0f",
-                      displayed_speed);
+    dbc_value_or_dash(speed, sizeof(speed), motor_speed_valid, "%.0f",
+                      data->motor.motor_speed_rpm);
     dbc_value_or_dash(power, sizeof(power), motor_fresh, "%.1f", data->motor.motor_power_kw);
     dbc_value_or_dash(throttle, sizeof(throttle), pedals_fresh, "%.1f", data->pedals.throttle_percent);
     dbc_value_or_dash(brake, sizeof(brake), pedals_fresh, "%.1f", data->pedals.brake_percent);
@@ -771,8 +700,8 @@ static void autonomous_can_dashboard_update(const ami_display_can_snapshot_t *da
                       data->motor.controller_temperature_c);
     dbc_value_or_dash(motor_temp, sizeof(motor_temp), motor_fresh, "%.1f",
                       data->motor.motor_temperature_c);
-    dbc_value_or_dash(dc_bus, sizeof(dc_bus), displayed_bus_valid, "%.1f",
-                      displayed_bus);
+    dbc_value_or_dash(dc_bus, sizeof(dc_bus), electrical_values_valid, "%.1f",
+                      data->electrical.drive_bus_voltage_v);
     dbc_value_or_dash(dc_current, sizeof(dc_current), electrical_values_valid, "%.1f",
                       data->electrical.drive_bus_current_a);
     const bool steering_valid = angles_fresh &&
@@ -880,20 +809,11 @@ static void driving_dashboard_update(const ami_display_can_snapshot_t *data)
                                                                AMI_DBC_FRAME_TIMEOUT_MS);
     const bool angles_fresh = ami_display_can_frame_is_fresh(&data->angles_and_sources.meta,
                                                                AMI_DBC_FRAME_TIMEOUT_MS);
-    const bool k2_status_fresh = ami_display_can_frame_is_fresh(&data->k2_status.meta,
-                                                                  AMI_DBC_FRAME_TIMEOUT_MS);
-    const bool k2_command_fresh = ami_display_can_frame_is_fresh(&data->k2_command.meta,
-                                                                   AMI_DBC_FRAME_TIMEOUT_MS);
     const bool motor_speed_valid = motor_fresh &&
         (!angles_fresh || data->angles_and_sources.source_state[3] == 1);
-    const bool displayed_speed_valid = motor_speed_valid ||
-                                       k2_status_fresh || k2_command_fresh;
-    const float displayed_speed = motor_speed_valid ? data->motor.motor_speed_rpm :
-                                  k2_status_fresh ? data->k2_status.speed_rpm :
-                                                    data->k2_command.speed_rpm;
     char text[20];
-    dbc_value_or_dash(text, sizeof(text), displayed_speed_valid, "%.0f",
-                      displayed_speed);
+    dbc_value_or_dash(text, sizeof(text), motor_speed_valid, "%.0f",
+                      data->motor.motor_speed_rpm);
     label_set_if_changed(objects.speed_label_2, text);
     dbc_value_or_dash(text, sizeof(text), motor_fresh, "%.1f", data->motor.motor_temperature_c);
     label_set_if_changed(objects.tempmotor_label, text);
@@ -1810,7 +1730,4 @@ void app_main(void)
         tskNO_AFFINITY);
 
     ESP_LOGI(TAG, "System started");
-    /* Reaching this point confirms CAN, display, input and UI initialisation.
-     * A freshly installed ota_0 image is now safe to keep. */
-    can_ota_control_confirm_running_app();
 }

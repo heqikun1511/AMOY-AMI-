@@ -73,11 +73,8 @@ idf.py menuconfig
 上电后程序会依次初始化 NVS、LCD、触摸屏、LVGL、CAN 和 UI 更新任务。
 
 - 短按 KEY1，可在 `Driver View` 和 `Autonomous` 页面间循环切换。
-- CAN 波特率为 `500 kbit/s`，同时接收 11 位标准帧和 29 位扩展帧。
-- 程序接收 K2 扩展帧 `0x08C1EF21` 或 `0x0CFFC6EF`，并保留 AMI
-  标准帧 `0x620`～`0x625` 的解析。
-- K2 报文前两个字节按小端格式解析为转速，计算公式为
-  `raw × 0.5 - 10000 rpm`。
+- 程序接收 CAN 扩展帧 `0x08C1EF21` 或 `0x0CFFC6EF`。
+- 报文前两个字节按小端格式解析为转速，分辨率为 `0.5 rpm/bit`。
 - 当前车速显示按 `abs(rpm) × 120 / 10000` 映射，并限制在 0～120。
 - CAN 初始化失败不会阻止界面运行，相关警告会输出到串口。
 
@@ -113,10 +110,3 @@ CAN ID、引脚和转速映射逻辑可在以下文件中调整：
 - 修改或重新导出 EEZ Studio UI 后，应检查分辨率、对象名称和 LVGL 8 API 是否保持兼容。
 - `managed_components/` 为组件管理器生成目录，无需手动提交到版本库。
 - 本工程使用eezstudio来完成，不支持flow功能特性
-
-## CAN 远程升级
-
-16 MiB Flash 已划分为固定 CAN Recovery 程序和位于 `ota_0` 的仪表主程序。
-协议、首次安装和 SocketCAN 测试方法见
-[`docs/CAN_REMOTE_UPDATE.md`](docs/CAN_REMOTE_UPDATE.md)，可导入的 DBC 文件为
-[`docs/ami_can_ota.dbc`](docs/ami_can_ota.dbc)。
