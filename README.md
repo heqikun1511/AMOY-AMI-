@@ -60,7 +60,7 @@ TWAI 工作在正常模式，波特率为 **250 kbit/s**，接收过滤器允许
 └── docs/                        # 硬件参考资料
 ```
 
-`main/ui/` 是界面导出代码；修改界面时应在 `wtf.eez-project` 中编辑并重新导出。重新导出后，检查分辨率、对象名称及 LVGL 8 API 与应用代码是否一致。本工程未启用 EEZ Flow 功能。
+
 
 ## 关键配置
 
@@ -109,3 +109,10 @@ idf.py -p /dev/ttyUSB0 flash monitor
 
 --任务驾驶界面：
 ![alt text](image-3.png)
+
+
+
+--车检界面设计：
+
+
+![alt text](image-4.png)
