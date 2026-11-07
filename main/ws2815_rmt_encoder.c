@@ -5,6 +5,9 @@
 
 static const char *TAG = "ws2815_encoder";
 
+#define WS2815_MIN_RESET_US 280U
+#define RMT_DURATION_MAX    0x7fffU
+
 /*
  * WS2815B 的 RMT 编码器实例
  *
@@ -124,6 +127,22 @@ static esp_err_t ws2815_encoder_reset(rmt_encoder_t *encoder)
     return ESP_OK;
 }
 
+bool ws2815_rmt_encoder_config_is_valid(const ws2815_rmt_encoder_config_t *config)
+{
+    if (config == NULL || config->reset_us < WS2815_MIN_RESET_US) {
+        return false;
+    }
+
+    uint64_t bit0_high_ticks = (uint64_t)config->resolution_hz * 3 / 10000000U;
+    uint64_t bit0_low_ticks = (uint64_t)config->resolution_hz * 9 / 10000000U;
+    uint64_t half_reset_ticks = (uint64_t)config->resolution_hz * config->reset_us /
+                                2000000U;
+
+    return bit0_high_ticks > 0 && bit0_high_ticks <= RMT_DURATION_MAX &&
+           bit0_low_ticks > 0 && bit0_low_ticks <= RMT_DURATION_MAX &&
+           half_reset_ticks > 0 && half_reset_ticks <= RMT_DURATION_MAX;
+}
+
 /**
  * @brief  创建 WS2815B 专用的 RMT 编码器
  * @param  config      配置(时钟分辨率 + 复位时间)
@@ -134,8 +153,18 @@ esp_err_t ws2815_new_rmt_encoder(const ws2815_rmt_encoder_config_t *config,
                                   rmt_encoder_handle_t *ret_encoder)
 {
     /* 参数校验: 配置指针和输出句柄都不能为空 */
-    ESP_RETURN_ON_FALSE(config && ret_encoder, ESP_ERR_INVALID_ARG, TAG,
+    ESP_RETURN_ON_FALSE(ret_encoder != NULL, ESP_ERR_INVALID_ARG, TAG,
                         "invalid encoder configuration");
+    *ret_encoder = NULL;
+    ESP_RETURN_ON_FALSE(ws2815_rmt_encoder_config_is_valid(config),
+                        ESP_ERR_INVALID_ARG, TAG, "invalid encoder configuration");
+
+    const uint32_t bit0_high_ticks =
+        (uint32_t)((uint64_t)config->resolution_hz * 3 / 10000000U);
+    const uint32_t bit0_low_ticks =
+        (uint32_t)((uint64_t)config->resolution_hz * 9 / 10000000U);
+    const uint32_t half_reset_ticks =
+        (uint32_t)((uint64_t)config->resolution_hz * config->reset_us / 2000000U);
 
     /* 分配编码器对象内存(rmt_alloc_encoder_mem 会保证 DMA/IRAM 可访问) */
     ws2815_rmt_encoder_t *ws2815 = rmt_alloc_encoder_mem(sizeof(*ws2815));
@@ -159,15 +188,15 @@ esp_err_t ws2815_new_rmt_encoder(const ws2815_rmt_encoder_config_t *config,
     rmt_bytes_encoder_config_t bytes_config = {
         .bit0 = {
             .level0 = 1,
-            .duration0 = config->resolution_hz * 3 / 10000000, /* 0.3 us 高电平 */
+            .duration0 = bit0_high_ticks, /* 0.3 us 高电平 */
             .level1 = 0,
-            .duration1 = config->resolution_hz * 9 / 10000000, /* 0.9 us 低电平 */
+            .duration1 = bit0_low_ticks, /* 0.9 us 低电平 */
         },
         .bit1 = {
             .level0 = 1,
-            .duration0 = config->resolution_hz * 9 / 10000000, /* 0.9 us 高电平 */
+            .duration0 = bit0_low_ticks, /* 0.9 us 高电平 */
             .level1 = 0,
-            .duration1 = config->resolution_hz * 3 / 10000000, /* 0.3 us 低电平 */
+            .duration1 = bit0_high_ticks, /* 0.3 us 低电平 */
         },
         .flags.msb_first = 1,   /* 高位先发(WS2815B 规定) */
     };
@@ -192,9 +221,8 @@ esp_err_t ws2815_new_rmt_encoder(const ws2815_rmt_encoder_config_t *config,
      * WS2815B 要求帧尾低电平复位时间 >280us。
      * 单个 RMT symbol 的 duration 字段只有 15 bit, 单独一个 symbol 表示不了太长的低电平,
      * 所以把复位时间一分为二: 用两个 duration(电平都为 0)拼出足够长的低电平。
-     * half_reset_ticks = (resolution_hz / 1e6) * reset_us / 2, 即半个复位时间对应的 tick 数。
+     * half_reset_ticks = resolution_hz * reset_us / 2e6, 即半个复位时间对应的 tick 数。
      */
-    uint32_t half_reset_ticks = config->resolution_hz / 1000000 * config->reset_us / 2;
     ws2815->reset_code = (rmt_symbol_word_t) {
         .level0 = 0,
         .duration0 = half_reset_ticks,

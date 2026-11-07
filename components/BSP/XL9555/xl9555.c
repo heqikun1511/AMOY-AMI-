@@ -10,6 +10,8 @@
 static const char *TAG = "XL9555";
 
 static i2c_master_dev_handle_t xl9555_dev = NULL;
+/* 输出锁存的初始复位值为高电平；BEEP 为低电平有效。 */
+static uint8_t s_output_port0 = 0xFF;
 
 /**
  * @brief       写XL9555寄存器
@@ -45,11 +47,29 @@ esp_err_t xl9555_init(i2c_master_bus_handle_t bus_handle)
         return ret;
     }
 
-    /* 配置端口: KEY0(IO1_0)和KEY1(IO0_7)为输入, 其余保持默认 */
+    /*
+     * 先显式关闭低电平有效的蜂鸣器，再将 EXIO0 配置为输出，避免初始化
+     * 过程中意外鸣叫。其余端口维持高电平复位状态。
+     */
+    ret = xl9555_write_reg(XL9555_OUTPUT_PORT0, s_output_port0);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to set initial output state: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    /* 配置端口: KEY0(IO1_0)和KEY1(IO0_7)为输入, 其余保持输出 */
     /* Port 0: IO0_7 (KEY1) = 输入, 其余保持输出(0) */
     /* Port 1: IO1_0 (KEY0) = 输入, 其余保持输出(0) */
-    xl9555_write_reg(XL9555_CFG_PORT0, XL9555_KEY1_BIT);   /* 仅bit7=1(输入) */
-    xl9555_write_reg(XL9555_CFG_PORT1, XL9555_KEY0_BIT);   /* 仅bit0=1(输入) */
+    ret = xl9555_write_reg(XL9555_CFG_PORT0, XL9555_KEY1_BIT);   /* 仅bit7=1(输入) */
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to configure port 0: %s", esp_err_to_name(ret));
+        return ret;
+    }
+    ret = xl9555_write_reg(XL9555_CFG_PORT1, XL9555_KEY0_BIT);   /* 仅bit0=1(输入) */
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to configure port 1: %s", esp_err_to_name(ret));
+        return ret;
+    }
 
     ESP_LOGI(TAG, "XL9555 initialized (KEY0=EXIO8, KEY1=EXIO7)");
     return ESP_OK;
@@ -77,4 +97,22 @@ uint8_t xl9555_key1_read(void)
         return (val & XL9555_KEY1_BIT) ? 1 : 0;
     }
     return 1; /* 读取失败返回松开 */
+}
+
+/**
+ * @brief       控制蜂鸣器 (EXIO0，低电平有效)
+ */
+esp_err_t xl9555_beep_set(bool on)
+{
+    if (xl9555_dev == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    uint8_t output = on ? (s_output_port0 & ~XL9555_BEEP_BIT)
+                        : (s_output_port0 | XL9555_BEEP_BIT);
+    esp_err_t ret = xl9555_write_reg(XL9555_OUTPUT_PORT0, output);
+    if (ret == ESP_OK) {
+        s_output_port0 = output;
+    }
+    return ret;
 }

@@ -4,6 +4,9 @@ idf_component_register(
         "APP" 
         "ui"
         "BSP" 
+    EXCLUDE_SRCS
+        "rotary_input.c"
+        "ws2815_rmt_encoder.c"
     INCLUDE_DIRS 
         "."
         "APP"
@@ -11,7 +14,6 @@ idf_component_register(
         "BSP"
     REQUIRES
         driver
-        esp_driver_rmt
         nvs_flash
         esp_timer
         BSP)

@@ -59,7 +59,7 @@ typedef struct _objects_t {
     lv_obj_t *ts_a;
     lv_obj_t *v;
     lv_obj_t *v_1;
-    lv_obj_t *obj2;
+    lv_obj_t *autonomous_task_label;
     lv_obj_t *v_2;
     lv_obj_t *v_5;
     lv_obj_t *v_6;
@@ -188,6 +188,8 @@ typedef struct _objects_t {
     lv_obj_t *inspect_data_valid;
     lv_obj_t *inspect_footer;
     lv_obj_t *inspect_footer_status;
+    lv_obj_t *inspect_state_led;
+    lv_obj_t *inspect_amoy_logo;
     lv_obj_t *inspect_data_age;
 } objects_t;
 

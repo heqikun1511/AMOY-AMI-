@@ -30,9 +30,14 @@
 #include "lvgl.h"
 #include "ui/ui.h"
 
-/* MIPI竖屏旋转和PSRAM旋转缓冲区 */
+/* MIPI 竖屏使用横屏 UI；最终帧由 flush_cb 旋转到物理面板。 */
 static bool g_need_rotate = false;
 static uint16_t *g_rot_buf = NULL;
+
+/* Keep the display rotation in software.  Flipping the HX8399 scan order via
+ * MADCTL corrupts output on this panel, while this mapping rotates the whole
+ * logical landscape frame by 180 degrees reliably. */
+#define LVGL_DISPLAY_ROTATE_180 1
 
 /* Forward declarations */
 void increase_lvgl_tick(void *arg);
@@ -192,15 +197,26 @@ void lvgl_disp_flush_cb(lv_disp_drv_t *disp_drv, const lv_area_t *area, lv_color
     uint32_t *px32 = (uint32_t *)color_p;    /* LVGL 32-bit ARGB8888 */
 
     if (g_need_rotate) {
-        lv_coord_t logical_total_w = disp_drv->hor_res;
         lv_coord_t logical_w = lv_area_get_width(area);
         lv_coord_t phys_w = lcddev.width;
         lv_coord_t phys_h = lcddev.height;
+#if !LVGL_DISPLAY_ROTATE_180
+        lv_coord_t logical_total_w = disp_drv->hor_res;
+#endif
 
         for (lv_coord_t ly = area->y1; ly <= area->y2; ly++) {
             for (lv_coord_t lx = area->x1; lx <= area->x2; lx++) {
-                lv_coord_t px = ly;
-                lv_coord_t py = logical_total_w - 1 - lx;
+                lv_coord_t px;
+                lv_coord_t py;
+
+#if LVGL_DISPLAY_ROTATE_180
+                /* Landscape (lx, ly) -> portrait, with a 180 degree turn. */
+                px = phys_w - 1 - ly;
+                py = lx;
+#else
+                px = ly;
+                py = logical_total_w - 1 - lx;
+#endif
                 if (px >= 0 && px < phys_w && py >= 0 && py < phys_h) {
                     uint32_t argb = px32[(ly - area->y1) * logical_w + (lx - area->x1)];
                     uint8_t r = (argb >> 16) & 0xFF;
@@ -274,14 +290,14 @@ static bool touchpad_is_pressed(void)
 static void touchpad_get_xy(lv_coord_t *x, lv_coord_t *y)
 {
     if (g_need_rotate) {
-        /* 物理触摸坐标(竖屏 1080x1920) → LVGL逻辑坐标(横屏 1920x1080)
-         * flush_cb逆映射:
-         *   物理坐标(px, py) → 逻辑坐标(lx, ly)
-         *   lx = lcddev.height - 1 - py
-         *   ly = px
-         */
+        /* Apply the inverse of the flush mapping so touch remains aligned. */
+#if LVGL_DISPLAY_ROTATE_180
+        *x = tp_dev.y[0];
+        *y = lcddev.width - 1 - tp_dev.x[0];
+#else
         *x = lcddev.height - 1 - tp_dev.y[0];
         *y = tp_dev.x[0];
+#endif
     } else {
         (*x) = tp_dev.x[0];
         (*y) = tp_dev.y[0];

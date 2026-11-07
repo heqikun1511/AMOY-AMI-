@@ -82,7 +82,10 @@ void create_screen_ami() {
             objects.driving = obj;
             lv_obj_set_pos(obj, 745, 318);
             lv_obj_set_size(obj, 62, 65);
-            lv_led_set_color(obj, lv_color_hex(0x00ff73));
+            /* AMI's default selection is manual driving.  Set it here as
+             * well as in the runtime selector so the first rendered frame
+             * is red, before the application UI task has its first slice. */
+            lv_led_set_color(obj, lv_color_hex(0xff0000));
             lv_led_set_brightness(obj, 255);
         }
     }
@@ -582,14 +585,14 @@ void create_screen_autonomous() {
         }
         {
             lv_obj_t *obj = lv_label_create(parent_obj);
-            objects.obj2 = obj;
+            objects.autonomous_task_label = obj;
             lv_obj_set_pos(obj, 171, 177);
             lv_obj_set_size(obj, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
             add_style_text(obj);
             lv_obj_set_style_text_align(obj, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN | LV_STATE_DEFAULT);
             lv_obj_set_style_text_color(obj, lv_color_hex(0x13ff00), LV_PART_MAIN | LV_STATE_DEFAULT);
             lv_obj_set_style_text_font(obj, &ui_font_orbiter_bold_100, LV_PART_MAIN | LV_STATE_DEFAULT);
-            lv_label_set_text_static(obj, "DRIVING");
+            lv_label_set_text_static(obj, "MANUAL DRIVING");
         }
         {
             // V_2
@@ -2633,21 +2636,52 @@ void create_screen_inspect() {
                     // inspect_footer_status
                     lv_obj_t *obj = lv_label_create(parent_obj);
                     objects.inspect_footer_status = obj;
-                    lv_obj_set_pos(obj, 28, 25);
-                    lv_obj_set_size(obj, 1250, 42);
+                    lv_obj_set_pos(obj, 28, 27);
+                    lv_obj_set_size(obj, 660, 38);
                     lv_obj_clear_flag(obj, LV_OBJ_FLAG_SCROLLABLE|LV_OBJ_FLAG_SCROLL_ELASTIC|LV_OBJ_FLAG_SCROLL_MOMENTUM|LV_OBJ_FLAG_SCROLL_WITH_ARROW);
                     add_style_text(obj);
                     lv_obj_set_style_text_color(obj, lv_color_hex(0xffd400), LV_PART_MAIN | LV_STATE_DEFAULT);
-                    lv_obj_set_style_text_font(obj, &ui_font_orbitron_bold_25, LV_PART_MAIN | LV_STATE_DEFAULT);
+                    lv_obj_set_style_text_font(obj, &ui_font_orbitron_bold_20, LV_PART_MAIN | LV_STATE_DEFAULT);
                     lv_obj_set_style_text_align(obj, LV_TEXT_ALIGN_LEFT, LV_PART_MAIN | LV_STATE_DEFAULT);
                     lv_label_set_text(obj, "");
+                }
+                {
+                    // inspect_state_led
+                    lv_obj_t *obj = lv_obj_create(parent_obj);
+                    objects.inspect_state_led = obj;
+                    lv_obj_set_pos(obj, 718, 29);
+                    lv_obj_set_size(obj, 34, 34);
+                    lv_obj_clear_flag(obj, LV_OBJ_FLAG_CLICKABLE|LV_OBJ_FLAG_CLICK_FOCUSABLE|LV_OBJ_FLAG_SCROLLABLE|LV_OBJ_FLAG_SCROLL_ELASTIC|LV_OBJ_FLAG_SCROLL_MOMENTUM|LV_OBJ_FLAG_SCROLL_WITH_ARROW);
+                    lv_obj_set_style_bg_color(obj, lv_color_hex(0xffd400), LV_PART_MAIN | LV_STATE_DEFAULT);
+                    lv_obj_set_style_bg_opa(obj, 255, LV_PART_MAIN | LV_STATE_DEFAULT);
+                    lv_obj_set_style_border_color(obj, lv_color_hex(0xffd400), LV_PART_MAIN | LV_STATE_DEFAULT);
+                    lv_obj_set_style_border_width(obj, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+                    lv_obj_set_style_border_opa(obj, 255, LV_PART_MAIN | LV_STATE_DEFAULT);
+                    lv_obj_set_style_radius(obj, 17, LV_PART_MAIN | LV_STATE_DEFAULT);
+                    lv_obj_set_style_pad_top(obj, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+                    lv_obj_set_style_pad_right(obj, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+                    lv_obj_set_style_pad_bottom(obj, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+                    lv_obj_set_style_pad_left(obj, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+                }
+                {
+                    // inspect_amoy_logo
+                    lv_obj_t *obj = lv_label_create(parent_obj);
+                    objects.inspect_amoy_logo = obj;
+                    lv_obj_set_pos(obj, 776, 18);
+                    lv_obj_set_size(obj, 438, 56);
+                    lv_obj_clear_flag(obj, LV_OBJ_FLAG_SCROLLABLE|LV_OBJ_FLAG_SCROLL_ELASTIC|LV_OBJ_FLAG_SCROLL_MOMENTUM|LV_OBJ_FLAG_SCROLL_WITH_ARROW);
+                    add_style_text(obj);
+                    lv_obj_set_style_text_color(obj, lv_color_hex(0xff2c2c), LV_PART_MAIN | LV_STATE_DEFAULT);
+                    lv_obj_set_style_text_font(obj, &ui_font_orbitron_bold_50, LV_PART_MAIN | LV_STATE_DEFAULT);
+                    lv_obj_set_style_text_align(obj, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN | LV_STATE_DEFAULT);
+                    lv_label_set_text_static(obj, "AMOY RACING");
                 }
                 {
                     // inspect_data_age
                     lv_obj_t *obj = lv_label_create(parent_obj);
                     objects.inspect_data_age = obj;
-                    lv_obj_set_pos(obj, 1324, 25);
-                    lv_obj_set_size(obj, 360, 42);
+                    lv_obj_set_pos(obj, 1300, 27);
+                    lv_obj_set_size(obj, 384, 38);
                     lv_obj_clear_flag(obj, LV_OBJ_FLAG_SCROLLABLE|LV_OBJ_FLAG_SCROLL_ELASTIC|LV_OBJ_FLAG_SCROLL_MOMENTUM|LV_OBJ_FLAG_SCROLL_WITH_ARROW);
                     add_style_text(obj);
                     lv_obj_set_style_text_color(obj, lv_color_hex(0x78828d), LV_PART_MAIN | LV_STATE_DEFAULT);

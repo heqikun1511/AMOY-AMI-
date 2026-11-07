@@ -7,6 +7,7 @@
 #ifndef __XL9555_H
 #define __XL9555_H
 
+#include <stdbool.h>
 #include <stdint.h>
 #include "esp_err.h"
 #include "driver/i2c_master.h"
@@ -17,8 +18,11 @@
 extern "C" {
 #endif
 
-/* XL9555 设备地址 (A2=A1=A0=GND) */
-#define XL9555_ADDR         0x20
+/*
+ * XL9555 7 位 I2C 地址。
+ * 板载原理图中 A2 接 ESP_3V3，A1/A0 接 GND，因此地址为 0b0100100。
+ */
+#define XL9555_ADDR         0x24
 
 /* XL9555 寄存器地址 */
 #define XL9555_INPUT_PORT0  0x00    /* 输入端口0 (只读) */
@@ -49,6 +53,7 @@ extern "C" {
 /* KEY连接在EXIO上的位定义 */
 #define XL9555_KEY0_BIT     (1 << 0)    /* EXIO8 = IO1_0 */
 #define XL9555_KEY1_BIT     (1 << 7)    /* EXIO7 = IO0_7 */
+#define XL9555_BEEP_BIT     (1 << 0)    /* EXIO0 = BEEP，低电平有效 */
 
 /**
  * @brief       初始化XL9555
@@ -68,6 +73,15 @@ uint8_t xl9555_key0_read(void);
  * @retval      0=按下, 1=松开 (低电平有效)
  */
 uint8_t xl9555_key1_read(void);
+
+/**
+ * @brief       控制板载有源蜂鸣器（EXIO0）
+ * @param       on : true=响，false=静音
+ * @retval      ESP_OK:成功
+ *
+ * 原理图中 EXIO0 通过 PNP 管驱动蜂鸣器，因此输出低电平时蜂鸣器响。
+ */
+esp_err_t xl9555_beep_set(bool on);
 
 #ifdef __cplusplus
 }
